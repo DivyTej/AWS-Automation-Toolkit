@@ -1,20 +1,3 @@
-function Show-MainMenu {
-    Write-Host "Main Dashboard - Select an Option" -ForegroundColor Cyan
-    Write-Host "1. Check AWS Identity (WhoAmI)"
-    Write-Host "2. Users Enumeration, Last Login, MFA Status"
-    Write-Host "3. Lambda Security Check"
-    Write-Host "4. Check for Publicly Accessible S3 Buckets"
-    Write-Host "5. IAM User/Role Managed Policy Enumeration"
-    Write-Host "6. IAM User/Role Inline Policy Enumeration"
-    Write-Host "7. Enumerate Security Groups"
-    Write-Host "8. Privilege Escalation Check"
-    Write-Host "9. Policy Details via ARN"
-    Write-Host "10. JSON Beautifier"
-    Write-Host "11. Exit"
-    $functionChoice = Read-Host "Enter the number of your choice"
-    return $functionChoice
-}
-
 # Function to check the current AWS identity (whoami)
 function Check-Identity {
     try {
@@ -43,7 +26,36 @@ function Check-IAMUsers {
         $users = aws iam list-users --query "Users[*].UserName" --output text --profile $selectedProfile --region $awsRegion
         $users = $users -split '\t'
 
+        # Check if there are no users
+        if ($users.Count -eq 0) {
+            Write-Host "No IAM users found." -ForegroundColor Yellow
+            return  # Exit the function if no users are found
+        }
+
+        # Add the root user as a special case
+        $rootUser = "root"
+        $users = $users + $rootUser  # Include the root account in the list
+
         foreach ($username in $users) {
+            Write-Host "Checking user: $username" -ForegroundColor Cyan
+
+            # Handle the root user separately
+            if ($username -eq $rootUser) {
+                # For root account, check MFA and inactivity
+                $mfaDevices = aws iam list-mfa-devices --user-name $rootUser --query "MFADevices" --output json --profile $selectedProfile --region $awsRegion
+                $mfaEnabled = if ($mfaDevices -eq "[]") { "MFA is not enabled." } else { "MFA is enabled." }
+                
+                # Check if the root account has been used (root account doesn't have PasswordLastUsed)
+                $rootStatus = "Root account activity not tracked by PasswordLastUsed."
+                
+                Write-Host "$rootStatus" -ForegroundColor Cyan
+                Write-Host "$mfaEnabled" -ForegroundColor Cyan
+                Write-Host "---------------------------------------------" -ForegroundColor Cyan
+                Write-Host ""
+                continue
+            }
+
+            # For regular IAM users, perform regular checks (last login, access keys, etc.)
             # Get user details (last password used)
             $userDetails = aws iam get-user --user-name $username --query "User.PasswordLastUsed" --output text --profile $selectedProfile --region $awsRegion
             $userLastLogin = if ($userDetails -ne "None") { [datetime]::Parse($userDetails) } else { $null }
@@ -63,9 +75,9 @@ function Check-IAMUsers {
                 }
             }
 
-            # Check MFA devices
-            $mfaDevices = aws iam list-mfa-devices --user-name $username --query "MFADevices" --output text --profile $selectedProfile --region $awsRegion
-            $mfaEnabled = if ($mfaDevices -ne "None") { "MFA is enabled." } else { "MFA is not enabled." }
+            # List MFA devices and handle empty response correctly
+            $mfaDevices = aws iam list-mfa-devices --user-name $username --query "MFADevices" --output json --profile $selectedProfile --region $awsRegion
+            $mfaEnabled = if ($mfaDevices -eq "[]") { "MFA is not enabled." } else { "MFA is enabled." }
 
             # Output the results
             $lastLoginOutput = if ($userLastLogin) { "Last password login: $($userLastLogin.ToString('yyyy-MM-dd HH:mm:ss'))" } else { "No password login recorded." }
@@ -193,25 +205,68 @@ function Check-LambdaSecurity {
     }
 }
 
-# Function to check for publicly accessible S3 buckets
+# Function to check for publicly accessible S3 buckets in all regions
 function Check-PublicS3Buckets {
     try {
-        $buckets = aws s3 ls --profile $selectedProfile | ForEach-Object { ($_ -split '\s+')[2] }
-        
-        foreach ($bucket in $buckets) {
-            Write-Host "Checking bucket: $bucket" -ForegroundColor Cyan
-            
-            # Check Bucket ACL for public access
-            $bucketAcl = aws s3api get-bucket-acl --bucket $bucket --profile $selectedProfile
-            $bucketAclDetails = $bucketAcl | ConvertFrom-Json
-            
-            # Check if "AllUsers" is included in the permissions
-            if ($bucketAclDetails.Grants | Where-Object { $_.Grantee.Type -eq "CanonicalUser" -and $_.Grantee.URI -eq "http://acs.amazonaws.com/groups/global/AllUsers" }) {
-                Write-Host "Warning: Bucket $bucket is publicly accessible" -ForegroundColor Red
-            } else {
-                Write-Host "Bucket $bucket is not publicly accessible" -ForegroundColor Green
-            }
+        # Save the original/default region before checking others
+        $defaultRegion = $awsRegion
+
+        # Get list of all available regions
+        $regions = aws ec2 describe-regions --query "Regions[*].RegionName" --output text --profile $selectedProfile --region $defaultRegion
+        $regions = $regions -split '\s+'
+
+        # If no regions found, exit the function
+        if ($regions.Count -eq 0) {
+            Write-Host "No regions found." -ForegroundColor Red
+            return
         }
+
+        # Loop through each region
+        foreach ($region in $regions) {
+            Write-Host "Checking region: $region" -ForegroundColor Cyan
+
+            # Set the region for the AWS CLI
+            $awsRegion = $region
+
+            # Check if the bucket exists in the current region
+            $bucketExists = $false
+            try {
+                # Attempt to list the buckets in the region
+                $buckets = aws s3api list-buckets --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+
+                # Check if the specific bucket is in the list
+                if ($buckets.Buckets.Name -contains 'organisation-monthly-billing-reports') {
+                    $bucketExists = $true
+                }
+            } catch {
+                Write-Host "Error listing buckets in region ${region}: $_" -ForegroundColor Red
+            }
+
+            if ($bucketExists) {
+                Write-Host "Checking bucket: organisation-monthly-billing-reports" -ForegroundColor Cyan
+                
+                # Check Bucket ACL for public access
+                $bucketAcl = aws s3api get-bucket-acl --bucket organisation-monthly-billing-reports --profile $selectedProfile --region $awsRegion
+                $bucketAclDetails = $bucketAcl | ConvertFrom-Json
+                
+                # Check if "AllUsers" is included in the permissions
+                if ($bucketAclDetails.Grants | Where-Object { $_.Grantee.Type -eq "CanonicalUser" -and $_.Grantee.URI -eq "http://acs.amazonaws.com/groups/global/AllUsers" }) {
+                    Write-Host "Warning: Bucket organisation-monthly-billing-reports is publicly accessible" -ForegroundColor Red
+                } else {
+                    Write-Host "Bucket organisation-monthly-billing-reports is not publicly accessible" -ForegroundColor Green
+                }
+            } else {
+                Write-Host "No S3 buckets found in region ${region}" -ForegroundColor Yellow
+            }
+
+            # Add a line break after checking each region
+            Write-Host "`n" -ForegroundColor Cyan
+        }
+
+        # After checking all regions, reset the region to the default region
+        $awsRegion = $defaultRegion
+        Write-Host "Region has been reset to the default region: $defaultRegion" -ForegroundColor Green
+
     } catch {
         Write-Host "An error occurred while checking public S3 buckets: $_" -ForegroundColor Red
     }
@@ -410,7 +465,7 @@ function Check-PrivilegeEscalation {
                     }
 
                     # Check for admin-like permissions in attached policies
-                    $adminLikePolicies = $attachedPolicies -split '\t' | Where-Object { $_ -match "AdministratorAccess|PowerUserAccess|FullAccess" }
+                    $adminLikePolicies = $attachedPolicies -split '\t' | Where-Object { $_ -match "AdministratorAccess|PowerUserAccess|FullAccess|IAMFullAccess|KMSFullAccess|SecurityAudit|AWSSupportAccess|AmazonS3FullAccess|AWSLambda_FullAccess|AmazonEC2FullAccess|AmazonRDSFullAccess" }
                     if ($adminLikePolicies) {
                         Write-Host "Warning: Role '$roleName' has admin-like permissions attached: $($adminLikePolicies -join ', ')" -ForegroundColor Red
                     }
@@ -447,6 +502,7 @@ function Check-PrivilegeEscalation {
     }
 }
 
+# function to fetch policy in json format via ARN
 function Get-PolicyVersionDetails {
     try {
         $policyArn = Read-Host "Enter the Policy ARN"
