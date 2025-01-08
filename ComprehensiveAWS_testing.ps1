@@ -45,7 +45,7 @@ function Show-MainMenu {
         "1. Check AWS Identity (WhoAmI)",
         "2. Users Enumeration, Last Login, MFA Status",
         "3. Lambda Security Check",
-        "4. Check for Publicly Accessible S3 Buckets",
+        "4. Check for Publicly Accessible S3 Buckets in each & every region",
         "5. IAM User/Role Managed Policy Enumeration",
         "6. IAM User/Role Inline Policy Enumeration",
         "7. Enumerate Security Groups",
@@ -54,10 +54,11 @@ function Show-MainMenu {
         "10. JSON Beautifier",
         "11. CIS Benchmark Compliance Check",
         "12. Advanced S3 Enumeration",
-        "13. Advanced Credential Analysis",
-        "14. Logging & Monitoring Weaknesses Check",
+        "13. Analyze Unused IAM Permissions",
+        "14. VPCs Enumeration & Weaknesses Check",
         "15. Check Rotational Keys",
-        "16. Exit"
+	"16. Check for sensitive ports",
+        "17. Exit"
     )
     Write-Host "`nMain Dashboard - Select an Option:" -ForegroundColor Cyan
     $menuOptions | ForEach-Object { Write-Host $_ }
@@ -77,6 +78,7 @@ Write-Host "================================" -ForegroundColor Cyan
 $selectedProfile = Select-AWSProfile
 Write-Host "You have selected profile: $selectedProfile" -ForegroundColor Green
 $awsRegion = Select-AWSRegion
+Write-Host "Using AWS Region: $awsRegion" -ForegroundColor Green  # Debugging region
 
 # Main loop
 do {
@@ -108,15 +110,18 @@ do {
         }
         "11" { Check-CISBenchmark }
         "12" { Check-S3BucketSecurity }
-        "13" { Advanced-CredentialAnalysis }
-        "14" { Check-LoggingMonitoringWeaknesses }
+        "13" { Analyze-UnusedIAMPermissions }
+        "14" { Enumerate-VPCs }
         "15" {
             $IAMEntityName = Read-Host "Enter IAM username or '*' to check all users"
             Check-RotationalKeys -IAMEntityName $IAMEntityName
         }
-        "16" {
-            Write-Host "Exiting script..." -ForegroundColor Green
-            break
+        "16" { 
+            Check-SensitivePorts -selectedProfile $selectedProfile -awsRegion $awsRegion
+        }
+	"17" {
+	    Write-Host "Exiting script..." -ForegroundColor Green
+	    return  # This will exit the entire script
         }
         default {
             Write-Host "Invalid choice. Please enter a number between 1 and 16." -ForegroundColor Red
