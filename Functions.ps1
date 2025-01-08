@@ -280,6 +280,29 @@ function Enumerate-ManagedPolicies {
     try {
         Write-Host "Fetching managed policies..." -ForegroundColor Cyan
 
+        # Define a list of dangerous policies or actions
+        $dangerousActions = @(
+            "iam:CreatePolicy",
+            "iam:PutRolePolicy",
+            "iam:AttachRolePolicy",
+            "iam:PassRole",
+            "iam:AddUserToGroup",
+            "sts:AssumeRole",
+            "*"
+        )
+
+        function Is-DangerousPolicy($policyArn) {
+            $policyDetails = aws iam get-policy --policy-arn $policyArn --output json --profile $selectedProfile | ConvertFrom-Json
+            $policyVersion = aws iam get-policy-version --policy-arn $policyArn --version-id $policyDetails.Policy.DefaultVersionId --output json --profile $selectedProfile | ConvertFrom-Json
+
+            foreach ($statement in $policyVersion.PolicyVersion.Document.Statement) {
+                if ($statement.Action -contains "*" -or ($statement.Action | Where-Object { $dangerousActions -contains $_ })) {
+                    return $true
+                }
+            }
+            return $false
+        }
+
         # Check if the user wants to fetch policies for all entities
         if ($EntityName -eq "*") {
             # Fetch all users and roles
@@ -291,7 +314,12 @@ function Enumerate-ManagedPolicies {
                 Write-Host "`nUser: $($user.UserName)" -ForegroundColor Yellow
                 $userPolicies = aws iam list-attached-user-policies --user-name $user.UserName --output json --profile $selectedProfile | ConvertFrom-Json
                 foreach ($policy in $userPolicies.AttachedPolicies) {
-                    Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn))" -ForegroundColor Green
+                    $isDangerous = Is-DangerousPolicy $policy.PolicyArn
+                    if ($isDangerous) {
+                        Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn)) [DANGEROUS]" -ForegroundColor Red
+                    } else {
+                        Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn))" -ForegroundColor Green
+                    }
                 }
             }
 
@@ -300,7 +328,12 @@ function Enumerate-ManagedPolicies {
                 Write-Host "`nRole: $($role.RoleName)" -ForegroundColor Yellow
                 $rolePolicies = aws iam list-attached-role-policies --role-name $role.RoleName --output json --profile $selectedProfile | ConvertFrom-Json
                 foreach ($policy in $rolePolicies.AttachedPolicies) {
-                    Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn))" -ForegroundColor Green
+                    $isDangerous = Is-DangerousPolicy $policy.PolicyArn
+                    if ($isDangerous) {
+                        Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn)) [DANGEROUS]" -ForegroundColor Red
+                    } else {
+                        Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn))" -ForegroundColor Green
+                    }
                 }
             }
         } else {
@@ -310,7 +343,12 @@ function Enumerate-ManagedPolicies {
             if ($userPolicies.AttachedPolicies.Count -gt 0) {
                 Write-Host "`nUser: $EntityName" -ForegroundColor Yellow
                 foreach ($policy in $userPolicies.AttachedPolicies) {
-                    Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn))" -ForegroundColor Green
+                    $isDangerous = Is-DangerousPolicy $policy.PolicyArn
+                    if ($isDangerous) {
+                        Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn)) [DANGEROUS]" -ForegroundColor Red
+                    } else {
+                        Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn))" -ForegroundColor Green
+                    }
                 }
             } else {
                 # If no user policies, try fetching role policies
@@ -318,7 +356,12 @@ function Enumerate-ManagedPolicies {
                 if ($rolePolicies.AttachedPolicies.Count -gt 0) {
                     Write-Host "`nRole: $EntityName" -ForegroundColor Yellow
                     foreach ($policy in $rolePolicies.AttachedPolicies) {
-                        Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn))" -ForegroundColor Green
+                        $isDangerous = Is-DangerousPolicy $policy.PolicyArn
+                        if ($isDangerous) {
+                            Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn)) [DANGEROUS]" -ForegroundColor Red
+                        } else {
+                            Write-Host "  Managed Policy: $($policy.PolicyName) ($($policy.PolicyArn))" -ForegroundColor Green
+                        }
                     }
                 } else {
                     Write-Host "`n$EntityName not found as a User or Role or does not have any attached managed policies." -ForegroundColor Red
@@ -335,8 +378,37 @@ function Enumerate-InlinePolicies {
     param (
         [string]$EntityName = '*'  # Default to '*' for all users/roles
     )
+    
     try {
         Write-Host "Fetching inline policies..." -ForegroundColor Cyan
+
+        # Define a list of dangerous actions or keywords
+        $dangerousActions = @(
+            "iam:CreatePolicy",
+            "iam:PutRolePolicy",
+            "iam:AttachRolePolicy",
+            "iam:PassRole",
+            "iam:AddUserToGroup",
+            "sts:AssumeRole",
+            "*"
+        )
+
+        # Function to check if a policy is dangerous based on actions
+        function Is-DangerousPolicy($policyName, $entityName, $isUser) {
+            $policyDocument = if ($isUser) {
+                aws iam get-user-policy --user-name $entityName --policy-name $policyName --output json --profile $selectedProfile | ConvertFrom-Json
+            } else {
+                aws iam get-role-policy --role-name $entityName --policy-name $policyName --output json --profile $selectedProfile | ConvertFrom-Json
+            }
+
+            # Check if the policy contains any dangerous actions
+            foreach ($statement in $policyDocument.PolicyDocument.Statement) {
+                if ($statement.Action -contains "*" -or ($statement.Action | Where-Object { $dangerousActions -contains $_ })) {
+                    return $true
+                }
+            }
+            return $false
+        }
 
         # Check if the user wants to fetch policies for all entities
         if ($EntityName -eq "*") {
@@ -349,7 +421,12 @@ function Enumerate-InlinePolicies {
                 Write-Host "`nUser: $($user.UserName)" -ForegroundColor Yellow
                 $userPolicies = aws iam list-user-policies --user-name $user.UserName --output json --profile $selectedProfile | ConvertFrom-Json
                 foreach ($policyName in $userPolicies.PolicyNames) {
-                    Write-Host "  Inline Policy: $($policyName)" -ForegroundColor Green
+                    $isDangerous = Is-DangerousPolicy $policyName $user.UserName $true
+                    if ($isDangerous) {
+                        Write-Host "  Inline Policy: $($policyName) [DANGEROUS]" -ForegroundColor Red
+                    } else {
+                        Write-Host "  Inline Policy: $($policyName)" -ForegroundColor Green
+                    }
                 }
             }
 
@@ -358,7 +435,12 @@ function Enumerate-InlinePolicies {
                 Write-Host "`nRole: $($role.RoleName)" -ForegroundColor Yellow
                 $rolePolicies = aws iam list-role-policies --role-name $role.RoleName --output json --profile $selectedProfile | ConvertFrom-Json
                 foreach ($policyName in $rolePolicies.PolicyNames) {
-                    Write-Host "  Inline Policy: $($policyName)" -ForegroundColor Green
+                    $isDangerous = Is-DangerousPolicy $policyName $role.RoleName $false
+                    if ($isDangerous) {
+                        Write-Host "  Inline Policy: $($policyName) [DANGEROUS]" -ForegroundColor Red
+                    } else {
+                        Write-Host "  Inline Policy: $($policyName)" -ForegroundColor Green
+                    }
                 }
             }
         } else {
@@ -368,7 +450,12 @@ function Enumerate-InlinePolicies {
             if ($userPolicies.PolicyNames.Count -gt 0) {
                 Write-Host "`nUser: $EntityName" -ForegroundColor Yellow
                 foreach ($policyName in $userPolicies.PolicyNames) {
-                    Write-Host "  Inline Policy: $($policyName)" -ForegroundColor Green
+                    $isDangerous = Is-DangerousPolicy $policyName $EntityName $true
+                    if ($isDangerous) {
+                        Write-Host "  Inline Policy: $($policyName) [DANGEROUS]" -ForegroundColor Red
+                    } else {
+                        Write-Host "  Inline Policy: $($policyName)" -ForegroundColor Green
+                    }
                 }
             } else {
                 # If no user policies, try fetching role inline policies
@@ -376,7 +463,12 @@ function Enumerate-InlinePolicies {
                 if ($rolePolicies.PolicyNames.Count -gt 0) {
                     Write-Host "`nRole: $EntityName" -ForegroundColor Yellow
                     foreach ($policyName in $rolePolicies.PolicyNames) {
-                        Write-Host "  Inline Policy: $($policyName)" -ForegroundColor Green
+                        $isDangerous = Is-DangerousPolicy $policyName $EntityName $false
+                        if ($isDangerous) {
+                            Write-Host "  Inline Policy: $($policyName) [DANGEROUS]" -ForegroundColor Red
+                        } else {
+                            Write-Host "  Inline Policy: $($policyName)" -ForegroundColor Green
+                        }
                     }
                 } else {
                     Write-Host "`n$EntityName not found as a User or Role or does not have any inline policies." -ForegroundColor Red
