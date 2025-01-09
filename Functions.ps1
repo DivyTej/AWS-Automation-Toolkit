@@ -221,42 +221,63 @@ function Check-PublicS3Buckets {
             return
         }
 
+        # Define the bucket names you're interested in
+        $bucketNamesToCheck = @(
+            'codepipeline-ap-south-1-272671467365',
+            'gas-alb-logs-po',
+            'gas-log-bucket',
+            'gas-survey',
+            'skjfnhsf-3bwkfkjk'
+        )
+
         # Loop through each region
         foreach ($region in $regions) {
-            Write-Host "Checking region: $region" -ForegroundColor Cyan
+            Write-Host "Checking region ${region}" -ForegroundColor Cyan
 
-            # Set the region for the AWS CLI
+            # Set the region for the AWS CLI command
             $awsRegion = $region
 
-            # Check if the bucket exists in the current region
-            $bucketExists = $false
             try {
-                # Attempt to list the buckets in the region
+                # Attempt to list the buckets in the current region
+                Write-Host "Listing buckets in region: ${awsRegion}..." -ForegroundColor Yellow
                 $buckets = aws s3api list-buckets --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+                
+                # Ensure there are buckets returned
+                if ($buckets.Buckets -and $buckets.Buckets.Name) {
+                    Write-Host "Buckets found in region ${awsRegion}:" -ForegroundColor Green
+                    $buckets.Buckets.Name | ForEach-Object { Write-Host $_ -ForegroundColor Green }
+                    
+                    # Check if any of the specified buckets exist in the region
+                    $bucketExists = $false
+                    foreach ($bucketName in $bucketNamesToCheck) {
+                        if ($buckets.Buckets.Name -contains $bucketName) {
+                            $bucketExists = $true
+                            Write-Host "Bucket found: ${bucketName}" -ForegroundColor Cyan
 
-                # Check if the specific bucket is in the list
-                if ($buckets.Buckets.Name -contains 'organisation-monthly-billing-reports') {
-                    $bucketExists = $true
+                            # Check Bucket ACL for public access
+                            $bucketAcl = aws s3api get-bucket-acl --bucket $bucketName --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+
+                            # Check if "AllUsers" is included in the permissions
+                            $publicAccessGrant = $bucketAcl.Grants | Where-Object { 
+                                $_.Grantee.Type -eq "CanonicalUser" -and $_.Grantee.URI -eq "http://acs.amazonaws.com/groups/global/AllUsers"
+                            }
+
+                            if ($publicAccessGrant) {
+                                Write-Host "Warning: Bucket ${bucketName} is publicly accessible" -ForegroundColor Red
+                            } else {
+                                Write-Host "Bucket ${bucketName} is not publicly accessible" -ForegroundColor Green
+                            }
+                        }
+                    }
+
+                    if (-not $bucketExists) {
+                        Write-Host "None of the specified buckets found in region ${awsRegion}" -ForegroundColor Yellow
+                    }
+                } else {
+                    Write-Host "No buckets found in region ${awsRegion}" -ForegroundColor Yellow
                 }
             } catch {
-                Write-Host "Error listing buckets in region ${region}: $_" -ForegroundColor Red
-            }
-
-            if ($bucketExists) {
-                Write-Host "Checking bucket: organisation-monthly-billing-reports" -ForegroundColor Cyan
-                
-                # Check Bucket ACL for public access
-                $bucketAcl = aws s3api get-bucket-acl --bucket organisation-monthly-billing-reports --profile $selectedProfile --region $awsRegion
-                $bucketAclDetails = $bucketAcl | ConvertFrom-Json
-                
-                # Check if "AllUsers" is included in the permissions
-                if ($bucketAclDetails.Grants | Where-Object { $_.Grantee.Type -eq "CanonicalUser" -and $_.Grantee.URI -eq "http://acs.amazonaws.com/groups/global/AllUsers" }) {
-                    Write-Host "Warning: Bucket organisation-monthly-billing-reports is publicly accessible" -ForegroundColor Red
-                } else {
-                    Write-Host "Bucket organisation-monthly-billing-reports is not publicly accessible" -ForegroundColor Green
-                }
-            } else {
-                Write-Host "No S3 buckets found in region ${region}" -ForegroundColor Yellow
+                Write-Host "Error listing buckets or checking ACL in region ${region}: $_" -ForegroundColor Red
             }
 
             # Add a line break after checking each region
@@ -265,7 +286,7 @@ function Check-PublicS3Buckets {
 
         # After checking all regions, reset the region to the default region
         $awsRegion = $defaultRegion
-        Write-Host "Region has been reset to the default region: $defaultRegion" -ForegroundColor Green
+        Write-Host "Region has been reset to the default region: ${defaultRegion}" -ForegroundColor Green
 
     } catch {
         Write-Host "An error occurred while checking public S3 buckets: $_" -ForegroundColor Red
@@ -523,6 +544,21 @@ function Check-PrivilegeEscalation {
         if ($roles.Count -eq 0) {
             Write-Host "No IAM roles found." -ForegroundColor Yellow
         } else {
+            # Define a list of full access policies
+            $fullAccessPolicies = @(
+                "SNSFullAccess",
+                "S3FullAccess",
+                "EC2FullAccess",
+                "IAMFullAccess",
+                "KMSFullAccess",
+                "RDSFullAccess",
+                "LambdaFullAccess",
+                "CloudWatchFullAccess",
+                "AWSSupportAccess",
+                "AdministratorAccess",
+                "PowerUserAccess"
+            )
+
             foreach ($role in $roles) {
                 $roleName = $role.RoleName
 
@@ -551,7 +587,14 @@ function Check-PrivilegeEscalation {
                     $attachedPolicies = aws iam list-attached-role-policies --role-name $roleName --profile $selectedProfile --region $awsRegion --query "AttachedPolicies[*].PolicyName" --output text
                     if ($attachedPolicies) {
                         Write-Host "Attached Policies:" -ForegroundColor Cyan
-                        $attachedPolicies -split '\t' | ForEach-Object { Write-Host "`t$_" -ForegroundColor White }
+                        $attachedPolicies -split '\t' | ForEach-Object {
+                            # Highlight full access policies
+                            if ($fullAccessPolicies -contains $_) {
+                                Write-Host "`tFull Access Policy: $_" -ForegroundColor Red
+                            } else {
+                                Write-Host "`t$_" -ForegroundColor White
+                            }
+                        }
                     } else {
                         Write-Host "No policies attached to this role." -ForegroundColor Yellow
                     }
@@ -898,61 +941,118 @@ function Check-CISBenchmark {
 
 #--------------------------------------------------Complaince Check--------------------------------------------------------
 
-# Function to perform advanced credential analysis
-function Advanced-CredentialAnalysis {
-    Write-Host "Starting advanced credential analysis..." -ForegroundColor Cyan
+# Function to analyze unused IAM permissions
+function Analyze-UnusedIAMPermissions {
+    Write-Host "Starting analysis of unused IAM permissions..." -ForegroundColor Cyan
 
     try {
-        # Search for exposed credentials in environment variables
-        Write-Host "Checking environment variables..." -ForegroundColor Yellow
-        $envVars = Get-ChildItem Env: | Where-Object { $_.Name -like '*AWS*' }
-        foreach ($envVar in $envVars) {
-            Write-Host "  Found: $($envVar.Name) = $($envVar.Value)" -ForegroundColor Red
-        }
-
-        # List IAM access keys and check their status
-        Write-Host "Checking IAM access keys..." -ForegroundColor Yellow
+        # Fetch list of IAM users
+        Write-Host "Fetching IAM users..." -ForegroundColor Yellow
         $users = aws iam list-users --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+
         foreach ($user in $users.Users) {
-            $keys = aws iam list-access-keys --user-name $user.UserName --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
-            foreach ($key in $keys.AccessKeyMetadata) {
-                Write-Host "  User: $($user.UserName) - Access Key: $($key.AccessKeyId) - Status: $($key.Status)" -ForegroundColor Cyan
+            Write-Host "Analyzing permissions for user: $($user.UserName)" -ForegroundColor Green
+
+            # Fetch Access Advisor data for the user
+            $accessAdvisor = aws iam generate-service-last-accessed-details --arn $user.Arn --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+            $jobId = $accessAdvisor.JobId
+
+            # Wait for the job to complete
+            Write-Host "Waiting for access advisor job to complete..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+
+            $jobStatus = aws iam get-service-last-accessed-details --job-id $jobId --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+            while ($jobStatus.JobStatus -ne "COMPLETED") {
+                Write-Host "Job Status: $($jobStatus.JobStatus)" -ForegroundColor Yellow
+                Start-Sleep -Seconds 5
+                $jobStatus = aws iam get-service-last-accessed-details --job-id $jobId --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+            }
+
+            # Parse results to find unused services
+            foreach ($service in $jobStatus.ServicesLastAccessed) {
+                if (-not $service.LastAuthenticated) {
+                    Write-Host "  Unused Permission: $($service.ServiceName) (No access detected)" -ForegroundColor Red
+                }
             }
         }
+
     } catch {
-        Write-Host "Error during credential analysis: $_" -ForegroundColor Red
+        Write-Host "Error during unused IAM permissions analysis: $_" -ForegroundColor Red
     }
 }
 
-# Function to check logging and monitoring weaknesses
-function Check-LoggingMonitoringWeaknesses {
-    Write-Host "Checking logging and monitoring configurations..." -ForegroundColor Cyan
+# Function to enumerate VPCs and highlight potential security flaws
+function Enumerate-VPCs {
+    Write-Host "Starting VPC enumeration and security analysis..." -ForegroundColor Cyan
 
     try {
-        # Check CloudTrail status
-        Write-Host "Checking CloudTrail status..." -ForegroundColor Yellow
-        $cloudTrails = aws cloudtrail describe-trails --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
-        foreach ($trail in $cloudTrails.trailList) {
-            if ($trail.Status.IsLogging) {
-                Write-Host "  CloudTrail: $($trail.Name) is logging." -ForegroundColor Green
-            } else {
-                Write-Host "  CloudTrail: $($trail.Name) is not logging." -ForegroundColor Red
-            }
-        }
-
-        # Check VPC Flow Logs
-        Write-Host "Checking VPC Flow Logs..." -ForegroundColor Yellow
+        # Fetch list of VPCs
+        Write-Host "Fetching VPCs..." -ForegroundColor Yellow
         $vpcs = aws ec2 describe-vpcs --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+
         foreach ($vpc in $vpcs.Vpcs) {
-            $logs = aws ec2 describe-flow-logs --filter Name=vpc-id,Values=$vpc.VpcId --output json | ConvertFrom-Json
-            if ($logs.FlowLogs.Count -gt 0) {
-                Write-Host "  VPC: $($vpc.VpcId) has flow logs enabled." -ForegroundColor Green
+            Write-Host "Analyzing VPC: $($vpc.VpcId)" -ForegroundColor Green
+
+            # Check if the VPC is publicly accessible (has an internet gateway attached)
+            $igws = aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=$($vpc.VpcId) --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+            if ($igws.InternetGateways.Count -gt 0) {
+                Write-Host "  Potential Flaw: VPC $($vpc.VpcId) has an Internet Gateway attached." -ForegroundColor Red
             } else {
-                Write-Host "  VPC: $($vpc.VpcId) does not have flow logs enabled." -ForegroundColor Red
+                Write-Host "  VPC $($vpc.VpcId) does not have an Internet Gateway." -ForegroundColor Cyan
+            }
+
+            # Enumerate security groups and check for overly permissive rules
+            $securityGroups = aws ec2 describe-security-groups --filters Name=vpc-id,Values=$($vpc.VpcId) --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+            foreach ($sg in $securityGroups.SecurityGroups) {
+                Write-Host "  Analyzing Security Group: $($sg.GroupId) - $($sg.GroupName)" -ForegroundColor Yellow
+
+                foreach ($permission in $sg.IpPermissions) {
+                    if ($permission.IpRanges | Where-Object { $_.CidrIp -eq "0.0.0.0/0" }) {
+                        Write-Host "    Potential Flaw: Security Group $($sg.GroupId) allows ingress from 0.0.0.0/0 on port $($permission.FromPort)-$($permission.ToPort)." -ForegroundColor Red
+                    }
+                }
+                foreach ($permission in $sg.IpPermissionsEgress) {
+                    if ($permission.IpRanges | Where-Object { $_.CidrIp -eq "0.0.0.0/0" }) {
+                        Write-Host "    Potential Flaw: Security Group $($sg.GroupId) allows egress to 0.0.0.0/0 on port $($permission.FromPort)-$($permission.ToPort)." -ForegroundColor Red
+                    }
+                }
+            }
+
+            # Check for unused network ACLs (NACLs)
+            $nacls = aws ec2 describe-network-acls --filters Name=vpc-id,Values=$($vpc.VpcId) --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+            foreach ($nacl in $nacls.NetworkAcls) {
+                if ($nacl.Associations.Count -eq 0) {
+                    Write-Host "  Potential Flaw: Network ACL $($nacl.NetworkAclId) is not associated with any subnet." -ForegroundColor Red
+                }
+
+                # Check for overly permissive NACL rules
+                foreach ($entry in $nacl.Entries) {
+                    if ($entry.CidrBlock -eq "0.0.0.0/0" -and $entry.RuleAction -eq "allow") {
+                        Write-Host "    Potential Flaw: Network ACL $($nacl.NetworkAclId) allows $($entry.RuleAction) traffic from 0.0.0.0/0 on port $($entry.PortRange)." -ForegroundColor Red
+                    }
+                }
+            }
+
+            # Check route tables for public routes
+            $routeTables = aws ec2 describe-route-tables --filters Name=vpc-id,Values=$($vpc.VpcId) --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+            foreach ($routeTable in $routeTables.RouteTables) {
+                foreach ($route in $routeTable.Routes) {
+                    if ($route.GatewayId -like "igw-*") {
+                        Write-Host "  Potential Flaw: Route Table $($routeTable.RouteTableId) has a public route via Internet Gateway $($route.GatewayId)." -ForegroundColor Red
+                    }
+                }
+            }
+
+            # Check subnets for public accessibility
+            $subnets = aws ec2 describe-subnets --filters Name=vpc-id,Values=$($vpc.VpcId) --output json --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+            foreach ($subnet in $subnets.Subnets) {
+                if ($subnet.MapPublicIpOnLaunch) {
+                    Write-Host "  Potential Flaw: Subnet $($subnet.SubnetId) is configured to assign public IPs on launch." -ForegroundColor Red
+                }
             }
         }
     } catch {
-        Write-Host "Error while checking logging and monitoring: $_" -ForegroundColor Red
+        Write-Host "Error during VPC enumeration: $_" -ForegroundColor Red
     }
 }
 
@@ -1054,8 +1154,8 @@ function Check-S3BucketSecurity {
                     }
 
                     # Ask the user to skip the file checking process after every 20 denied files
-                    if ($deniedCount % 20 -eq 0 -and $deniedCount -gt 0) {
-                        $skipBucket = Read-Host "20 files with denied access found. Do you want to skip checking files for this bucket entirely? (Press 's' to skip, Press Enter to continue)"
+                    if ($deniedCount % 5 -eq 0 -and $deniedCount -gt 0) {
+                        $skipBucket = Read-Host "5 files with denied access found. Do you want to skip checking files for this bucket entirely? (Press 's' to skip, Press Enter to continue)"
                         if ($skipBucket -eq "s") {
                             Write-Host "Skipping checking files for bucket: $bucket" -ForegroundColor Yellow
                             break  # Skip to next bucket
@@ -1141,5 +1241,112 @@ function Check-UserKeys {
         } else {
             Write-Host "Key $($key.KeyId) for user $UserName is within the rotation policy." -ForegroundColor Green
         }
+    }
+}
+
+# function for checking sensitive ports
+function Check-SensitivePorts {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion,
+        [switch]$Verbose
+    )
+
+    # Define a list of potentially sensitive ports to check
+    $sensitivePorts = @(22, 23, 3389, 21, 3306, 5432, 6379, 27017)
+
+    try {
+        # Validate inputs
+        if (-not $awsRegion) {
+            Write-Host "AWS region is not specified. Please provide a valid AWS region." -ForegroundColor Red
+            return
+        }
+        if (-not $selectedProfile) {
+            Write-Host "AWS CLI profile is not specified. Please provide a valid AWS CLI profile." -ForegroundColor Red
+            return
+        }
+
+        # Fetch all EC2 instances in the region
+        if ($Verbose) {
+            Write-Host "Fetching EC2 instances in region '$awsRegion' for profile '$selectedProfile'..." -ForegroundColor Yellow
+        }
+        $instances = aws ec2 describe-instances --profile $selectedProfile --region $awsRegion --query "Reservations[].Instances[].[InstanceId, Tags[?Key=='Name']|[0].Value, SecurityGroups[].GroupId, State.Name]" --output json | ConvertFrom-Json
+
+        if (-not $instances) {
+            Write-Host "No EC2 instances found in region $awsRegion." -ForegroundColor Yellow
+            return
+        }
+
+        # Initialize result arrays
+        $instancesWithSensitivePorts = @()
+        $instancesWithoutSensitivePorts = @()
+
+        # Process each instance
+        foreach ($instance in $instances) {
+            $instanceId = $instance[0]
+            $instanceName = if ($instance[1]) { $instance[1] } else { "No Name" }
+            $securityGroups = $instance[2]
+            $instanceState = $instance[3]
+
+            if ($Verbose) {
+                Write-Host "Checking instance $instanceId ($instanceName)... State: $instanceState" -ForegroundColor Cyan
+            }
+
+            $foundSensitivePort = $false
+            $openPorts = @()
+
+            # Check each security group for sensitive ports
+            foreach ($sg in $securityGroups) {
+                $sgDetails = aws ec2 describe-security-groups --group-ids $sg --profile $selectedProfile --region $awsRegion --query "SecurityGroups[0].IpPermissions" --output json | ConvertFrom-Json
+
+                foreach ($permission in $sgDetails) {
+                    $fromPort = $permission.FromPort
+                    $toPort = $permission.ToPort
+
+                    if ($fromPort -and $toPort) {
+                        foreach ($port in $sensitivePorts) {
+                            if ($port -ge $fromPort -and $port -le $toPort) {
+                                if ($Verbose) {
+                                    Write-Host "Sensitive port $port found in security group $sg for instance $instanceId ($instanceName)." -ForegroundColor Red
+                                }
+                                $foundSensitivePort = $true
+                                $openPorts += $port
+                            }
+                        }
+                    }
+                }
+            }
+
+            # Add to results based on findings
+            if ($foundSensitivePort) {
+                $instancesWithSensitivePorts += [PSCustomObject]@{
+                    InstanceId    = $instanceId
+                    InstanceName  = $instanceName
+                    PortsEnabled  = $openPorts -join ', '
+                    InstanceState = $instanceState
+                }
+            } else {
+                $instancesWithoutSensitivePorts += [PSCustomObject]@{
+                    InstanceId    = $instanceId
+                    InstanceName  = $instanceName
+                    PortsEnabled  = "None"
+                    InstanceState = $instanceState
+                }
+            }
+        }
+
+        # Display results
+        Write-Host "`nInstances with Sensitive Ports Enabled:" -ForegroundColor Red
+        $instancesWithSensitivePorts | Format-Table -Property InstanceId, InstanceName, PortsEnabled, InstanceState
+
+        Write-Host "`nInstances without Sensitive Ports Enabled:" -ForegroundColor Green
+        $instancesWithoutSensitivePorts | Format-Table -Property InstanceId, InstanceName, PortsEnabled, InstanceState
+
+        Write-Host "`nSummary:" -ForegroundColor Cyan
+        Write-Host "Total Instances with Sensitive Ports: $($instancesWithSensitivePorts.Count)" -ForegroundColor Red
+        Write-Host "Total Instances without Sensitive Ports: $($instancesWithoutSensitivePorts.Count)" -ForegroundColor Green
+
+    } catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
