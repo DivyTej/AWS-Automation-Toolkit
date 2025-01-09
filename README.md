@@ -20,9 +20,10 @@ The **AWS Automation Toolkit** is a collection of PowerShell scripts designed to
 10. **JSON Beautifier**: Format and beautify JSON outputs for better readability.
 11. **CIS Benchmark Compliance Check**: Evaluate your AWS environment against CIS benchmarks.
 12. **Advanced S3 Enumeration**: Deep dive into S3 configurations for enhanced security insights.
-13. **Advanced Credential Analysis**: Analyze IAM credentials and access keys for weaknesses.
-14. **Logging & Monitoring Weaknesses Check**: Assess logging and monitoring configurations for potential issues.
+13. **Analyze Unused IAM Permissions**: Analyze unused IAM permissions for weaknesses.
+14. **VPCs Enumeration & Weaknesses Check**: Assess logging and monitoring configurations for potential issues.
 15. **Check Rotational Keys**: Verify compliance with key rotation policies.
+16. **Check for sensitive open ports on instance**: Check for open ports on instance
 
 ---
 
@@ -31,10 +32,19 @@ The **AWS Automation Toolkit** is a collection of PowerShell scripts designed to
    ```bash
    git clone https://github.com/your-username/AWS-Automation-Toolkit.git
    cd AWS-Automation-Toolkit
+   ```
 
 ## Usage
 1. Navigate to the directory:
-      cd '.\AWS Automation Toolkit\'
+   ```powershell
+   cd '.\AWS Automation Toolkit\'
+   ```
 2. Execute the main script:
-      .\ComprehensiveAWS_testing.ps1 (If faced any issue, try: **Set-ExecutionPolicy RemoteSigned -Scope CurrentUser**)
+   ```powershell
+   .\ComprehensiveAWS_testing.ps1
+   ```
+   If faced with any issue, try:
+   ```powershell
+   Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+   ```
 3. Follow the menu prompts to select the desired option.
