@@ -117,7 +117,7 @@ do {
             Check-RotationalKeys -IAMEntityName $IAMEntityName
         }
         "16" { 
-            Check-SensitivePorts -selectedProfile $selectedProfile -awsRegion $awsRegion
+            Check-SensitivePorts -selectedProfile $selectedProfile -awsRegion $awsRegion -Verbose
         }
 	"17" {
 	    Write-Host "Exiting script..." -ForegroundColor Green
