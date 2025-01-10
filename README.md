@@ -28,7 +28,11 @@ The **AWS Automation Toolkit** is a collection of PowerShell scripts designed to
 14. **VPCs Enumeration & Weaknesses Check**: Enumerate VPC configurations and identify weaknesses.
 15. **Check Rotational Keys**: Verify compliance with key rotation policies.
 16. **Check for Sensitive Open Ports on Instances**: Analyze instances for open ports that might pose security risks.
-17. **Exit**: Exit the toolkit.
+17. **Check for EC2 Instances with Outdated AMIs**: Identify EC2 instances running outdated AMIs.
+18. **Check for Unencrypted EBS Volumes**: Check for unencrypted EBS volumes in the environment.
+19. **Inspect API Gateway Configurations**: Inspect the configurations of API Gateway for security misconfigurations.
+20. **List Unused Security Groups**: List security groups that are not being used.
+21. **Exit**: Exit the toolkit.
 
 ---
 
