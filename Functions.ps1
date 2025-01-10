@@ -221,15 +221,6 @@ function Check-PublicS3Buckets {
             return
         }
 
-        # Define the bucket names you're interested in
-        $bucketNamesToCheck = @(
-            'codepipeline-ap-south-1-272671467365',
-            'gas-alb-logs-po',
-            'gas-log-bucket',
-            'gas-survey',
-            'skjfnhsf-3bwkfkjk'
-        )
-
         # Loop through each region
         foreach ($region in $regions) {
             Write-Host "Checking region ${region}" -ForegroundColor Cyan
@@ -241,43 +232,43 @@ function Check-PublicS3Buckets {
                 # Attempt to list the buckets in the current region
                 Write-Host "Listing buckets in region: ${awsRegion}..." -ForegroundColor Yellow
                 $buckets = aws s3api list-buckets --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
-                
+
                 # Ensure there are buckets returned
                 if ($buckets.Buckets -and $buckets.Buckets.Name) {
                     Write-Host "Buckets found in region ${awsRegion}:" -ForegroundColor Green
-                    $buckets.Buckets.Name | ForEach-Object { Write-Host $_ -ForegroundColor Green }
-                    
-                    # Check if any of the specified buckets exist in the region
-                    $bucketExists = $false
-                    foreach ($bucketName in $bucketNamesToCheck) {
-                        if ($buckets.Buckets.Name -contains $bucketName) {
-                            $bucketExists = $true
-                            Write-Host "Bucket found: ${bucketName}" -ForegroundColor Cyan
+                    $buckets.Buckets.Name | ForEach-Object { Write-Host " - $_" -ForegroundColor Green }
 
-                            # Check Bucket ACL for public access
-                            $bucketAcl = aws s3api get-bucket-acl --bucket $bucketName --profile $selectedProfile --region $awsRegion | ConvertFrom-Json
+                    # Check public access for each bucket
+                    foreach ($bucket in $buckets.Buckets.Name) {
+                        Write-Host "`nChecking public access for bucket: $bucket" -ForegroundColor Cyan
 
-                            # Check if "AllUsers" is included in the permissions
-                            $publicAccessGrant = $bucketAcl.Grants | Where-Object { 
-                                $_.Grantee.Type -eq "CanonicalUser" -and $_.Grantee.URI -eq "http://acs.amazonaws.com/groups/global/AllUsers"
+                        try {
+                            # Determine the bucket's region
+                            $bucketLocation = aws s3api get-bucket-location --bucket $bucket --profile $selectedProfile | ConvertFrom-Json
+                            $bucketRegion = if ($bucketLocation.LocationConstraint) { $bucketLocation.LocationConstraint } else { "us-east-1" }
+
+                            # Check the bucket ACL in the correct region
+                            $bucketAcl = aws s3api get-bucket-acl --bucket $bucket --profile $selectedProfile --region $bucketRegion | ConvertFrom-Json
+
+                            # Check for public access
+                            $publicAccessGrant = $bucketAcl.Grants | Where-Object {
+                                $_.Grantee.URI -eq "http://acs.amazonaws.com/groups/global/AllUsers"
                             }
 
                             if ($publicAccessGrant) {
-                                Write-Host "Warning: Bucket ${bucketName} is publicly accessible" -ForegroundColor Red
+                                Write-Host "Warning: Bucket $bucket is publicly accessible" -ForegroundColor Red
                             } else {
-                                Write-Host "Bucket ${bucketName} is not publicly accessible" -ForegroundColor Green
+                                Write-Host "Bucket $bucket is not publicly accessible" -ForegroundColor Green
                             }
+                        } catch {
+                            Write-Host ("Error checking public access for bucket ${bucket}: " + $_.ToString()) -ForegroundColor Red
                         }
-                    }
-
-                    if (-not $bucketExists) {
-                        Write-Host "None of the specified buckets found in region ${awsRegion}" -ForegroundColor Yellow
                     }
                 } else {
                     Write-Host "No buckets found in region ${awsRegion}" -ForegroundColor Yellow
                 }
             } catch {
-                Write-Host "Error listing buckets or checking ACL in region ${region}: $_" -ForegroundColor Red
+                Write-Host ("Error listing buckets in region ${region}: " + $_.ToString()) -ForegroundColor Red
             }
 
             # Add a line break after checking each region
@@ -289,7 +280,7 @@ function Check-PublicS3Buckets {
         Write-Host "Region has been reset to the default region: ${defaultRegion}" -ForegroundColor Green
 
     } catch {
-        Write-Host "An error occurred while checking public S3 buckets: $_" -ForegroundColor Red
+        Write-Host ("An error occurred while checking public S3 buckets: " + $_.ToString()) -ForegroundColor Red
     }
 }
 
@@ -1345,6 +1336,328 @@ function Check-SensitivePorts {
         Write-Host "`nSummary:" -ForegroundColor Cyan
         Write-Host "Total Instances with Sensitive Ports: $($instancesWithSensitivePorts.Count)" -ForegroundColor Red
         Write-Host "Total Instances without Sensitive Ports: $($instancesWithoutSensitivePorts.Count)" -ForegroundColor Green
+
+    } catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# Function to check for outdated AMIs
+function Check-EC2OutdatedAMIs {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion
+    )
+
+    Write-Host "Checking outdated AMIs in region ${awsRegion} using profile ${selectedProfile}..." -ForegroundColor Cyan
+
+    try {
+        # Get the list of AMIs in the region
+        $amis = Get-EC2Image -Region $awsRegion -ProfileName $selectedProfile -Filter @{ Name = 'state'; Values = 'available' }
+        $outdatedAMIs = @()
+
+        # Check if each AMI is older than a certain threshold (e.g., 6 months)
+        foreach ($ami in $amis) {
+            $amiCreationDate = [DateTime]::Parse($ami.CreationDate)
+            $dateDifference = (Get-Date) - $amiCreationDate
+
+            # Set the threshold to 6 months (180 days)
+            if ($dateDifference.Days -gt 180) {
+                $outdatedAMIs += $ami
+            }
+        }
+
+        if ($outdatedAMIs.Count -gt 0) {
+            Write-Host "`nOutdated AMIs found in region ${awsRegion}:" -ForegroundColor Green
+            $outdatedAMIs | ForEach-Object {
+                Write-Host "AMI ID: $($_.ImageId), Name: $($_.Name), Creation Date: $($_.CreationDate)" -ForegroundColor Yellow
+            }
+
+            # Ask the user for further action
+            $actionChoice = Read-Host "Do you want to delete these outdated AMIs? (Y/N)"
+            if ($actionChoice -eq 'Y') {
+                $outdatedAMIs | ForEach-Object {
+                    Write-Host "Deleting AMI ID: $($_.ImageId), Name: $($_.Name)" -ForegroundColor Red
+                    # Uncomment below line to actually delete the AMI
+                    # Remove-EC2Image -Region $awsRegion -ImageId $_.ImageId -ProfileName $selectedProfile
+                }
+                Write-Host "Outdated AMIs have been deleted." -ForegroundColor Green
+            } else {
+                Write-Host "No AMIs were deleted." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "`nNo outdated AMIs found in region ${awsRegion}." -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "An error occurred while checking for outdated AMIs: $_" -ForegroundColor Red
+    }
+}
+
+# function for checking unencrypted ebs volume
+function Check-UnencryptedEBSVolumes {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion,
+        [switch]$Verbose
+    )
+
+    try {
+        # Validate inputs
+        if (-not $awsRegion) {
+            Write-Host "AWS region is not specified. Please provide a valid AWS region." -ForegroundColor Red
+            return
+        }
+        if (-not $selectedProfile) {
+            Write-Host "AWS CLI profile is not specified. Please provide a valid AWS CLI profile." -ForegroundColor Red
+            return
+        }
+
+        # Fetch all EBS volumes in the region
+        if ($Verbose) {
+            Write-Host "Fetching EBS volumes in region '$awsRegion' for profile '$selectedProfile'..." -ForegroundColor Yellow
+        }
+        $volumes = aws ec2 describe-volumes --profile $selectedProfile --region $awsRegion --query "Volumes[].[VolumeId, Encrypted, Attachments[0].InstanceId]" --output json | ConvertFrom-Json
+
+        if (-not $volumes) {
+            Write-Host "No EBS volumes found in region $awsRegion." -ForegroundColor Yellow
+            return
+        }
+
+        # Initialize result array
+        $unencryptedVolumes = @()
+
+        # Process each volume
+        foreach ($volume in $volumes) {
+            $volumeId = $volume[0]
+            $encrypted = $volume[1]
+            $instanceId = if ($volume[2]) { $volume[2].InstanceId } else { "Not Attached" }
+
+            if ($Verbose) {
+                Write-Host "Checking volume $volumeId... Encrypted: $encrypted, Attached to: $instanceId" -ForegroundColor Cyan
+            }
+
+            if (-not $encrypted) {
+                $unencryptedVolumes += [PSCustomObject]@{
+                    VolumeId      = $volumeId
+                    InstanceId    = $instanceId
+                    Encrypted     = $encrypted
+                }
+            }
+        }
+
+        # Display results
+        Write-Host "`nUnencrypted EBS Volumes:" -ForegroundColor Red
+        $unencryptedVolumes | Format-Table -Property VolumeId, InstanceId, Encrypted
+
+        Write-Host "`nSummary:" -ForegroundColor Cyan
+        Write-Host "Total Unencrypted EBS Volumes: $($unencryptedVolumes.Count)" -ForegroundColor Red
+
+    } catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# Inspect API Gateway Configurations Function
+function Inspect-APIGatewayConfigurations {
+    Param (
+        [string]$Region,
+        [string]$selectedProfile
+    )
+
+    Write-Output "Inspecting API Gateway Configurations in region: $Region"
+
+    # Set AWS CLI region for subsequent commands
+    $env:AWS_DEFAULT_REGION = $Region
+
+    # Retrieve all API Gateway Rest APIs using AWS CLI
+    $apisJson = aws apigateway get-rest-apis --region $Region --output json --profile $selectedProfile 2>&1
+    if ($apisJson -like "*error*" -or $apisJson -notmatch "^\s*{") {
+        Write-Output "Error retrieving API Gateway APIs: $apisJson"
+        return
+    }
+
+    try {
+        $apis = $apisJson | ConvertFrom-Json
+    } catch {
+        Write-Output "Failed to parse API Gateway response: $($_.Exception.Message)"
+        return
+    }
+
+    if (-not $apis.items) {
+        Write-Output "No API Gateway endpoints found in region: $Region"
+        return
+    }
+
+    # Retrieve all usage plans once
+    $usagePlansJson = aws apigateway get-usage-plans --region $Region --profile $selectedProfile --output json 2>&1
+    if ($usagePlansJson -like "*error*" -or $usagePlansJson -notmatch "^\s*{") {
+        Write-Output "Error retrieving usage plans: $usagePlansJson"
+        return
+    }
+
+    try {
+        $usagePlans = $usagePlansJson | ConvertFrom-Json
+    } catch {
+        Write-Output "Failed to parse usage plans: $($_.Exception.Message)"
+        return
+    }
+
+    # Inspect each API
+    foreach ($api in $apis.items) {
+        Write-Output "Inspecting API: $($api.name) (ID: $($api.id))"
+
+        # Retrieve API details
+        $detailsJson = aws apigateway get-rest-api --rest-api-id $api.id --region $Region --profile $selectedProfile --output json 2>&1
+        if ($detailsJson -like "*error*" -or $detailsJson -notmatch "^\s*{") {
+            Write-Output "  [ERROR] Unable to retrieve details for API $($api.name): $detailsJson"
+            continue
+        }
+
+        try {
+            $details = $detailsJson | ConvertFrom-Json
+        } catch {
+            Write-Output "  [ERROR] Failed to parse API details for $($api.name): $($_.Exception.Message)"
+            continue
+        }
+
+        # Check Endpoint Configuration
+        if ($details.endpointConfiguration -and $details.endpointConfiguration.types) {
+            $endpointType = $details.endpointConfiguration.types -join ", "
+            Write-Output "  Endpoint Type: $endpointType"
+            if ($endpointType -notcontains "REGIONAL" -and $endpointType -notcontains "EDGE") {
+                Write-Output "  [WARNING] Endpoint does not use secure HTTPS!"
+            }
+        } else {
+            Write-Output "  [WARNING] Endpoint configuration is missing or invalid!"
+        }
+
+        # Check if an API key is required
+        $plansForApi = $usagePlans.items | Where-Object { $_.apiStages.apiId -contains $api.id }
+        if (-not $plansForApi) {
+            Write-Output "  [WARNING] No usage plans associated with API."
+        } else {
+            Write-Output "  Usage Plans: $($plansForApi.name -join ', ')"
+        }
+
+        # Authentication Check (simplified example)
+        if (-not $details.apiKeySource) {
+            Write-Output "  [WARNING] API lacks strong authentication mechanisms!"
+        } else {
+            Write-Output "  API Key Source: $($details.apiKeySource)"
+        }
+    }
+
+    Write-Output "Completed API Gateway inspection in region: $Region"
+}
+
+# Function to list unused security groups using AWS CLI
+function Check-SecurityGroups {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion,
+        [switch]$Verbose
+    )
+
+    try {
+        # Validate inputs
+        if (-not $awsRegion) {
+            Write-Host "AWS region is not specified. Please provide a valid AWS region." -ForegroundColor Red
+            return
+        }
+        if (-not $selectedProfile) {
+            Write-Host "AWS CLI profile is not specified. Please provide a valid AWS CLI profile." -ForegroundColor Red
+            return
+        }
+
+        # Fetch all security groups in the region
+        if ($Verbose) {
+            Write-Host "Fetching security groups in region '$awsRegion' for profile '$selectedProfile'..." -ForegroundColor Yellow
+        }
+        $securityGroups = aws ec2 describe-security-groups --profile $selectedProfile --region $awsRegion --query "SecurityGroups[].[GroupId, GroupName]" --output json | ConvertFrom-Json
+
+        if (-not $securityGroups) {
+            Write-Host "No security groups found in region $awsRegion." -ForegroundColor Yellow
+            return
+        }
+
+        # Initialize result arrays
+        $usedSecurityGroups = @()
+        $unusedSecurityGroups = @()
+
+        # Process each security group
+        foreach ($sg in $securityGroups) {
+            $groupId = $sg[0]
+            $groupName = $sg[1]
+
+            if ($Verbose) {
+                Write-Host "Checking security group $groupName ($groupId)..." -ForegroundColor Cyan
+            }
+
+            # Check for EC2 instances using the security group
+            $instances = aws ec2 describe-instances --profile $selectedProfile --region $awsRegion --query "Reservations[].Instances[].[SecurityGroups[].GroupId]" --output json | ConvertFrom-Json
+
+            $attachedToEC2 = $false
+            foreach ($reservation in $instances) {
+                foreach ($instance in $reservation) {
+                    if ($instance -contains $groupId) {
+                        $attachedToEC2 = $true
+                        break
+                    }
+                }
+                if ($attachedToEC2) { break }
+            }
+
+            # Check for network interfaces using the security group
+            if (-not $attachedToEC2) {
+                $networkInterfaces = aws ec2 describe-network-interfaces --profile $selectedProfile --region $awsRegion --query "NetworkInterfaces[].[Groups[].GroupId]" --output json | ConvertFrom-Json
+
+                foreach ($interface in $networkInterfaces) {
+                    if ($interface -contains $groupId) {
+                        $attachedToEC2 = $true
+                        break
+                    }
+                }
+            }
+
+            # Check for Elastic Load Balancers using the security group
+            if (-not $attachedToEC2) {
+                $elbs = aws elb describe-load-balancers --profile $selectedProfile --region $awsRegion --query "LoadBalancerDescriptions[].SecurityGroups" --output json | ConvertFrom-Json
+
+                foreach ($elb in $elbs) {
+                    if ($elb -contains $groupId) {
+                        $attachedToEC2 = $true
+                        break
+                    }
+                }
+            }
+
+            # Categorize the security group as used or unused
+            if ($attachedToEC2) {
+                $usedSecurityGroups += [PSCustomObject]@{
+                    GroupId   = $groupId
+                    GroupName = $groupName
+                    IsUnused  = $false
+                }
+            } else {
+                $unusedSecurityGroups += [PSCustomObject]@{
+                    GroupId   = $groupId
+                    GroupName = $groupName
+                    IsUnused  = $true
+                }
+            }
+        }
+
+        # Display Unused Security Groups
+        Write-Host "`nUnused Security Groups:" -ForegroundColor Red
+        $unusedSecurityGroups | Format-Table -Property GroupId, GroupName, IsUnused
+
+        # Display Used Security Groups
+        Write-Host "`nUsed Security Groups:" -ForegroundColor Green
+        $usedSecurityGroups | Format-Table -Property GroupId, GroupName, IsUnused
+
+        Write-Host "`nSummary:" -ForegroundColor Cyan
+        Write-Host "Total Unused Security Groups: $($unusedSecurityGroups.Count)" -ForegroundColor Red
+        Write-Host "Total Used Security Groups: $($usedSecurityGroups.Count)" -ForegroundColor Green
 
     } catch {
         Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
