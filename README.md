@@ -46,7 +46,7 @@ The **AWS Automation Toolkit** is a collection of PowerShell scripts designed to
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/AWS-Automation-Toolkit.git
+   git clone https://github.com/DivyTej/AWS-Automation-Toolkit.git
    cd AWS-Automation-Toolkit
    ```
 
