@@ -62,7 +62,8 @@ function Show-MainMenu {
         "18. Check for Unencrypted EBS Volumes",
         "19. Inspect API Gateway Configurations",  # New option for API Gateway inspection
         "20. List Unused Security Groups",          # New option for unused security groups check
-        "21. Exit"
+        "21. List AWS Logging",
+        "22. Exit"
     )
     Write-Host "`nMain Dashboard - Select an Option:" -ForegroundColor Cyan
     $menuOptions | ForEach-Object { Write-Host $_ }
@@ -162,9 +163,12 @@ do {
             Inspect-APIGatewayConfigurations -Region $awsRegion -SelectedProfile $selectedProfile 
         }
         "20" { 
-            Check-SecurityGroups -SelectedProfile $selectedProfile -awsRegion "ap-south-1" -Verbose
+            Check-SecurityGroups -SelectedProfile $selectedProfile -awsRegion $awsRegion -Verbose
         }
-        "21" {
+        "21" { 
+            Check-AWSLoggingStatus -SelectedProfile $selectedProfile -awsRegion $awsRegion -Verbose
+        }
+        "22" {
             Write-Host "Exiting script..." -ForegroundColor Green
             return  # Exit the loop and script
         }
