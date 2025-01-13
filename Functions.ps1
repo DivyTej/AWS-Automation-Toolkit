@@ -1663,3 +1663,99 @@ function Check-SecurityGroups {
         Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
+
+# function for checking logging for vpc, cloudtrail, waf, dns, and all other important stuff
+function Check-AWSLoggingStatus {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion,
+        [switch]$Verbose
+    )
+
+    try {
+        # Validate inputs
+        if (-not $awsRegion) {
+            Write-Host "AWS region is not specified. Please provide a valid AWS region." -ForegroundColor Red
+            return
+        }
+        if (-not $selectedProfile) {
+            Write-Host "AWS CLI profile is not specified. Please provide a valid AWS CLI profile." -ForegroundColor Red
+            return
+        }
+
+        # Check VPC Flow Logs
+        if ($Verbose) { Write-Host "Checking VPC Flow Logs..." -ForegroundColor Yellow }
+        $vpcs = aws ec2 describe-vpcs --profile $selectedProfile --region $awsRegion --query "Vpcs[].VpcId" --output json | ConvertFrom-Json
+
+        foreach ($vpcId in $vpcs) {
+            $flowLogs = aws ec2 describe-flow-logs --profile $selectedProfile --region $awsRegion --query "FlowLogs[?ResourceId=='$vpcId']" --output json | ConvertFrom-Json
+
+            if ($flowLogs) {
+                Write-Host "VPC Flow Logs are enabled for VPC: $vpcId" -ForegroundColor Green
+            } else {
+                Write-Host "VPC Flow Logs are disabled for VPC: $vpcId" -ForegroundColor Red
+            }
+        }
+
+        # Check CloudTrail Logs
+        if ($Verbose) { Write-Host "Checking CloudTrail logs..." -ForegroundColor Yellow }
+        $cloudTrails = aws cloudtrail describe-trails --profile $selectedProfile --region $awsRegion --query "trailList" --output json | ConvertFrom-Json
+
+        if (-not $cloudTrails) {
+            Write-Host "No CloudTrails found in the region. Logging is disabled." -ForegroundColor Red
+        } else {
+            foreach ($trail in $cloudTrails) {
+                $isLogging = aws cloudtrail get-trail-status --profile $selectedProfile --region $awsRegion --name $trail.Name --query "IsLogging" --output text
+                if ($isLogging -eq "true") {
+                    Write-Host "CloudTrail logging is enabled for trail: $($trail.Name)" -ForegroundColor Green
+                } else {
+                    Write-Host "CloudTrail logging is disabled for trail: $($trail.Name)" -ForegroundColor Red
+                }
+            }
+        }
+
+        # Check DNS Resolver Query Logs
+        if ($Verbose) { Write-Host "Checking DNS Resolver Query Logs..." -ForegroundColor Yellow }
+        $queryLogConfigs = aws route53resolver list-resolver-query-log-configs --profile $selectedProfile --region $awsRegion --query "ResolverQueryLogConfigs" --output json | ConvertFrom-Json
+
+        if ($queryLogConfigs.Count -eq 0) {
+            Write-Host "DNS Resolver Query Logging is disabled." -ForegroundColor Red
+        } else {
+            foreach ($config in $queryLogConfigs) {
+                Write-Host "DNS Resolver Query Logging is enabled for config: $($config.Name)" -ForegroundColor Green
+            }
+        }
+
+        # Check WAF Logs
+        if ($Verbose) { Write-Host "Checking WAF logs..." -ForegroundColor Yellow }
+        $wafWebACLs = aws wafv2 list-web-acls --profile $selectedProfile --region $awsRegion --scope REGIONAL --query "WebACLs" --output json | ConvertFrom-Json
+
+        if (-not $wafWebACLs) {
+            Write-Host "No WAF Web ACLs found. Logging is not applicable." -ForegroundColor Yellow
+        } else {
+            foreach ($webACL in $wafWebACLs) {
+                $loggingEnabled = aws wafv2 get-logging-configuration --profile $selectedProfile --region $awsRegion --resource-arn $webACL.ARN --output json 2>$null
+                if ($loggingEnabled) {
+                    Write-Host "WAF logging is enabled for Web ACL: $($webACL.Name)" -ForegroundColor Green
+                } else {
+                    Write-Host "WAF logging is disabled for Web ACL: $($webACL.Name)" -ForegroundColor Red
+                }
+            }
+        }
+
+        # Check GuardDuty
+        if ($Verbose) { Write-Host "Checking GuardDuty..." -ForegroundColor Yellow }
+        $detectors = aws guardduty list-detectors --profile $selectedProfile --region $awsRegion --query "DetectorIds" --output json | ConvertFrom-Json
+
+        if ($detectors.Count -eq 0) {
+            Write-Host "GuardDuty is disabled." -ForegroundColor Red
+        } else {
+            Write-Host "GuardDuty is enabled." -ForegroundColor Green
+        }
+
+        Write-Host "Logging status checks completed." -ForegroundColor Green
+
+    } catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
