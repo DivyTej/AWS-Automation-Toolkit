@@ -15,7 +15,7 @@ The **AWS Automation Toolkit** is a collection of PowerShell scripts designed to
 1. **Check AWS Identity (WhoAmI)**: Identify the currently authenticated AWS identity.
 2. **Users Enumeration, Last Login, MFA Status**: List all users, their last login timestamps, and MFA configuration.
 3. **Lambda Security Check**: Analyze AWS Lambda configurations for security issues.
-4. **Check for Publicly Accessible S3 Buckets**: Identify misconfigured S3 buckets with public access.
+4. **Check for Publicly Accessible S3 Buckets in All Regions**: Identify misconfigured S3 buckets with public access.
 5. **IAM User/Role Managed Policy Enumeration**: List and evaluate all managed policies attached to users and roles.
 6. **IAM User/Role Inline Policy Enumeration**: Inspect inline policies attached to users and roles.
 7. **Enumerate Security Groups**: Analyze security group configurations for open or overly permissive rules.
@@ -25,14 +25,16 @@ The **AWS Automation Toolkit** is a collection of PowerShell scripts designed to
 11. **CIS Benchmark Compliance Check**: Evaluate your AWS environment against CIS benchmarks.
 12. **Advanced S3 Enumeration**: Deep dive into S3 configurations for enhanced security insights.
 13. **Analyze Unused IAM Permissions**: Identify unused IAM permissions for potential cleanup.
-14. **VPCs Enumeration & Weaknesses Check**: Enumerate VPC configurations and identify weaknesses.
+14. **VPC Enumeration & Weaknesses Check**: Enumerate VPC configurations and identify weaknesses.
 15. **Check Rotational Keys**: Verify compliance with key rotation policies.
 16. **Check for Sensitive Open Ports on Instances**: Analyze instances for open ports that might pose security risks.
 17. **Check for EC2 Instances with Outdated AMIs**: Identify EC2 instances running outdated AMIs.
 18. **Check for Unencrypted EBS Volumes**: Check for unencrypted EBS volumes in the environment.
 19. **Inspect API Gateway Configurations**: Inspect the configurations of API Gateway for security misconfigurations.
 20. **List Unused Security Groups**: List security groups that are not being used.
-21. **Exit**: Exit the toolkit.
+21. **List AWS Logging**: Identify active and inactive AWS logging configurations.
+22. **Exit**: Exit the toolkit.
+
 
 ---
 
