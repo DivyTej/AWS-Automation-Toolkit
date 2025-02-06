@@ -1759,3 +1759,154 @@ function Check-AWSLoggingStatus {
         Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
+
+# function for checking rds info
+function Get-RDSInstances {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion
+    )
+
+    try {
+        Write-Host "Fetching RDS instances..." -ForegroundColor Cyan
+        
+        # Run AWS CLI and capture output
+        $rdsInstancesRaw = aws rds describe-db-instances --query "DBInstances[*]" --output json --profile $selectedProfile --region $awsRegion 2>$null
+        
+        # Print raw output for debugging
+        Write-Host "Raw AWS CLI Output:" -ForegroundColor Yellow
+        Write-Host $rdsInstancesRaw
+
+        # Convert JSON to PowerShell Object
+        if (-not $rdsInstancesRaw -or $rdsInstancesRaw -eq "[]" -or $rdsInstancesRaw -match "null") {
+            Write-Host "No RDS instances found or unable to retrieve data." -ForegroundColor Yellow
+            return
+        }
+
+        $rdsInstances = $rdsInstancesRaw | ConvertFrom-Json
+
+        # Check if it's an array
+        if ($rdsInstances -isnot [array]) {
+            $rdsInstances = @($rdsInstances)  # Force it to be an array
+        }
+
+        foreach ($instance in $rdsInstances) {
+            Write-Host "RDS Instance: $($instance.DBInstanceIdentifier)" -ForegroundColor Green
+            Write-Host "Engine: $($instance.Engine)" -ForegroundColor Cyan
+            Write-Host "Engine Version: $($instance.EngineVersion)" -ForegroundColor Cyan
+            Write-Host "Publicly Accessible: $($instance.PubliclyAccessible)" -ForegroundColor Cyan
+            Write-Host "KMS Key ID: $($instance.KmsKeyId)" -ForegroundColor Cyan
+            Write-Host "Deletion Protection: $($instance.DeletionProtection)" -ForegroundColor Cyan
+            Write-Host "VPC ID: $($instance.DBSubnetGroup.VpcId)" -ForegroundColor Cyan
+            Write-Host "Subnet Group: $($instance.DBSubnetGroup.DBSubnetGroupName)" -ForegroundColor Cyan
+            Write-Host "Backup Retention Period: $($instance.BackupRetentionPeriod) days" -ForegroundColor Cyan
+            Write-Host "Preferred Backup Window: $($instance.PreferredBackupWindow)" -ForegroundColor Cyan
+            Write-Host "Storage Encrypted: $($instance.StorageEncrypted)" -ForegroundColor Cyan
+            
+            # Security Groups
+            if ($instance.VpcSecurityGroups.Count -gt 0) {
+                Write-Host "Security Groups:" -ForegroundColor Cyan
+                foreach ($sg in $instance.VpcSecurityGroups) {
+                    Write-Host "  - $($sg.VpcSecurityGroupId)" -ForegroundColor Magenta
+                }
+            } else {
+                Write-Host "No security groups found." -ForegroundColor Yellow
+            }
+            
+            # Parameter Groups
+            if ($instance.DBParameterGroups.Count -gt 0) {
+                Write-Host "Parameter Groups:" -ForegroundColor Cyan
+                foreach ($pg in $instance.DBParameterGroups) {
+                    Write-Host "  - Parameter Group: $($pg.DBParameterGroupName)" -ForegroundColor Magenta
+                }
+            } else {
+                Write-Host "No parameter groups found." -ForegroundColor Yellow
+            }
+            
+            # Associated IAM Roles
+            if ($instance.AssociatedRoles.Count -gt 0) {
+                Write-Host "Associated Roles:" -ForegroundColor Cyan
+                foreach ($role in $instance.AssociatedRoles) {
+                    Write-Host "  - Role ARN: $($role.RoleArn)" -ForegroundColor Magenta
+                }
+            } else {
+                Write-Host "No associated roles." -ForegroundColor Yellow
+            }
+
+            # Security Checks
+            if ($instance.StorageEncrypted -ne $true) {
+                Write-Host "[WARNING] Storage encryption is NOT enabled!" -ForegroundColor Red
+            }
+            if ($instance.PubliclyAccessible -eq $true) {
+                Write-Host "[WARNING] Instance is publicly accessible!" -ForegroundColor Red
+            }
+            if ($instance.AutoMinorVersionUpgrade -ne $true) {
+                Write-Host "[WARNING] Automatic minor version upgrades are NOT enabled!" -ForegroundColor Red
+            }
+            
+            Write-Host "---------------------------------------------" -ForegroundColor Cyan
+        }
+    } catch {
+        Write-Host "An error occurred while fetching RDS instances: $_" -ForegroundColor Red
+    }
+}
+
+# funtion for checking SQS misconfigurations
+function Get-SQSConfiguration {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion
+    )
+
+    try {
+        Write-Host "Fetching SQS queue configurations..." -ForegroundColor Cyan
+
+        # Fetch SQS queue URLs
+        $queueUrlsRaw = aws sqs list-queues --query "QueueUrls" --output json --profile $selectedProfile --region $awsRegion 2>$null
+        $queueUrls = $queueUrlsRaw | ConvertFrom-Json
+
+        if (-not $queueUrls) {
+            Write-Host "No SQS queues found or unable to retrieve data." -ForegroundColor Yellow
+            return
+        }
+
+        foreach ($queueUrl in $queueUrls) {
+            Write-Host "Checking SQS Queue: $queueUrl" -ForegroundColor Green
+            
+            # Fetch queue attributes
+            $queueAttributesRaw = aws sqs get-queue-attributes --queue-url $queueUrl --attribute-names All --output json --profile $selectedProfile --region $awsRegion 2>$null
+            $queueAttributes = $queueAttributesRaw | ConvertFrom-Json
+            
+            # Access Control Check
+            if ($queueAttributes.Attributes.Policy) {
+                Write-Host "Access Control Policy Found:" -ForegroundColor Cyan
+                Write-Host $queueAttributes.Attributes.Policy -ForegroundColor Yellow
+            } else {
+                Write-Host "No Access Control Policy set. Review IAM policies." -ForegroundColor Red
+            }
+
+            # Encryption Check
+            if ($queueAttributes.Attributes.KmsMasterKeyId) {
+                Write-Host "Encryption Enabled: $($queueAttributes.Attributes.KmsMasterKeyId)" -ForegroundColor Cyan
+            } else {
+                Write-Host "Warning: Encryption at rest not enabled." -ForegroundColor Red
+            }
+
+            # Dead Letter Queue Check
+            if ($queueAttributes.Attributes.RedrivePolicy) {
+                Write-Host "Dead Letter Queue (DLQ) Configured:" -ForegroundColor Cyan
+                Write-Host $queueAttributes.Attributes.RedrivePolicy -ForegroundColor Yellow
+            } else {
+                Write-Host "Warning: No Dead Letter Queue (DLQ) configured." -ForegroundColor Red
+            }
+
+            # Monitoring Alerts Check (CloudWatch)
+            Write-Host "Consider setting up CloudWatch alarms for queue depth and failure rates." -ForegroundColor Yellow
+            
+            Write-Host "---------------------------------------------" -ForegroundColor Cyan
+        }
+    } catch {
+        Write-Host "An error occurred while fetching SQS configurations: $_" -ForegroundColor Red
+    }
+}
+
