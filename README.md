@@ -33,7 +33,9 @@ The **AWS Automation Toolkit** is a collection of PowerShell scripts designed to
 19. **Inspect API Gateway Configurations**: Inspect the configurations of API Gateway for security misconfigurations.
 20. **List Unused Security Groups**: List security groups that are not being used.
 21. **List AWS Logging**: Identify active and inactive AWS logging configurations.
-22. **Exit**: Exit the toolkit.
+22. **AWS RDS Security Check**: Assess security configurations of AWS RDS instances.
+23. **AWS SQS Security Check**: Identify misconfigurations in AWS SQS queues.
+24. **Exit**: Exit the toolkit.
 
 
 ---
