@@ -60,10 +60,12 @@ function Show-MainMenu {
         "16. Check for sensitive open ports on instance",
         "17. Check for EC2 Instances with Outdated AMIs",
         "18. Check for Unencrypted EBS Volumes",
-        "19. Inspect API Gateway Configurations",  # New option for API Gateway inspection
-        "20. List Unused Security Groups",          # New option for unused security groups check
+        "19. Inspect API Gateway Configurations",
+        "20. List Unused Security Groups",
         "21. List AWS Logging",
-        "22. Exit"
+        "22. List all RDS instances with details",
+        "23. Check SQS Misconfiguration",
+        "24. Exit"
     )
     Write-Host "`nMain Dashboard - Select an Option:" -ForegroundColor Cyan
     $menuOptions | ForEach-Object { Write-Host $_ }
@@ -75,37 +77,27 @@ function Wait-ForConfirmation {
     Read-Host "Press Enter to return to the main dashboard"
 }
 
-# Function to list unused security groups using AWS CLI
-function List-UnusedSecurityGroups {
+# Function to list all RDS instances and details using AWS CLI
+function List-RDSInstances {
     param (
-        [string]$region = "ap-south-1"
+        [string]$selectedProfile,
+        [string]$awsRegion
     )
 
+    Write-Host "Listing RDS instances in region: $awsRegion" -ForegroundColor Cyan
+
     try {
-        Write-Host "Listing unused security groups in region: $region"
+        $rdsInstances = aws rds describe-db-instances --profile $selectedProfile --region $awsRegion --query "DBInstances[*].[DBInstanceIdentifier,Engine,EngineVersion,PubliclyAccessible,KmsKeyId,DeletionProtection,AssociatedRoles]" --output table
 
-        # Get all security groups using AWS CLI
-        $all_sgs = aws ec2 describe-security-groups --region $region --query "SecurityGroups[].GroupId" --output text
-        $sg_ids = $all_sgs -split "`n"
-
-        # Get all network interfaces using AWS CLI
-        $enis = aws ec2 describe-network-interfaces --region $region --query "NetworkInterfaces[].Groups[].GroupId" --output text
-        $attached_sgs = $enis -split "`n"
-
-        # Unused security groups
-        $unused_sgs = $sg_ids | Where-Object { $_ -notin $attached_sgs }
-
-        Write-Host "Unused Security Groups:"
-        if ($unused_sgs) {
-            foreach ($sg_id in $unused_sgs) {
-                Write-Host $sg_id
-            }
+        if ($rdsInstances) {
+            Write-Host "`nRDS Instances:" -ForegroundColor Green
+            Write-Host $rdsInstances
         } else {
-            Write-Host "No unused security groups found."
+            Write-Host "No RDS instances found." -ForegroundColor Yellow
         }
     }
     catch {
-        Write-Host "Error occurred while listing unused security groups: $_" -ForegroundColor Red
+        Write-Host "Error retrieving RDS instances: $_" -ForegroundColor Red
     }
 }
 
@@ -169,11 +161,15 @@ do {
             Check-AWSLoggingStatus -SelectedProfile $selectedProfile -awsRegion $awsRegion -Verbose
         }
         "22" {
+            Get-RDSInstances -SelectedProfile $selectedProfile -awsRegion $awsRegion -Verbose
+        }
+        "23" { Get-SQSConfiguration -SelectedProfile $selectedProfile -awsRegion $awsRegion -Verbose }
+        "24" {
             Write-Host "Exiting script..." -ForegroundColor Green
             return  # Exit the loop and script
         }
         default {
-            Write-Host "Invalid choice. Please enter a number between 1 and 21." -ForegroundColor Red
+            Write-Host "Invalid choice. Please enter a number between 1 and 24." -ForegroundColor Red
         }
     }
 
