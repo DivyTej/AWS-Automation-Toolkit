@@ -1394,7 +1394,7 @@ function Check-EC2OutdatedAMIs {
 }
 
 # function for checking unencrypted ebs volume
-function Check-UnencryptedEBSVolumes {
+function Check-EBSConfiguration {
     param (
         [string]$selectedProfile,
         [string]$awsRegion,
@@ -1402,7 +1402,6 @@ function Check-UnencryptedEBSVolumes {
     )
 
     try {
-        # Validate inputs
         if (-not $awsRegion) {
             Write-Host "AWS region is not specified. Please provide a valid AWS region." -ForegroundColor Red
             return
@@ -1412,50 +1411,79 @@ function Check-UnencryptedEBSVolumes {
             return
         }
 
-        # Fetch all EBS volumes in the region
-        if ($Verbose) {
-            Write-Host "Fetching EBS volumes in region '$awsRegion' for profile '$selectedProfile'..." -ForegroundColor Yellow
-        }
+        # Fetch all EBS volumes
+        if ($Verbose) { Write-Host "Fetching EBS volumes..." -ForegroundColor Yellow }
         $volumes = aws ec2 describe-volumes --profile $selectedProfile --region $awsRegion --query "Volumes[].[VolumeId, Encrypted, Attachments[0].InstanceId]" --output json | ConvertFrom-Json
 
         if (-not $volumes) {
-            Write-Host "No EBS volumes found in region $awsRegion." -ForegroundColor Yellow
+            Write-Host "No EBS volumes found." -ForegroundColor Yellow
             return
         }
 
-        # Initialize result array
         $unencryptedVolumes = @()
-
-        # Process each volume
         foreach ($volume in $volumes) {
             $volumeId = $volume[0]
             $encrypted = $volume[1]
-            $instanceId = if ($volume[2]) { $volume[2].InstanceId } else { "Not Attached" }
-
-            if ($Verbose) {
-                Write-Host "Checking volume $volumeId... Encrypted: $encrypted, Attached to: $instanceId" -ForegroundColor Cyan
-            }
+            $instanceId = if ($volume[2]) { $volume[2] } else { "Not Attached" }
 
             if (-not $encrypted) {
-                $unencryptedVolumes += [PSCustomObject]@{
-                    VolumeId      = $volumeId
-                    InstanceId    = $instanceId
-                    Encrypted     = $encrypted
+                $unencryptedVolumes += [PSCustomObject]@{ VolumeId = $volumeId; InstanceId = $instanceId; Encrypted = "False" }
+            }
+        }
+
+        # Fetch snapshots and check encryption
+        if ($Verbose) { Write-Host "Fetching EBS snapshots..." -ForegroundColor Yellow }
+        $snapshots = aws ec2 describe-snapshots --profile $selectedProfile --region $awsRegion --owner-ids self --query "Snapshots[].[SnapshotId, VolumeId, Encrypted]" --output json | ConvertFrom-Json
+
+        $unencryptedSnapshots = @()
+        foreach ($snapshot in $snapshots) {
+            if (-not $snapshot[2]) {
+                $unencryptedSnapshots += [PSCustomObject]@{
+                    SnapshotId = $snapshot[0]
+                    VolumeId   = $snapshot[1]
+                    Encrypted  = "False"
                 }
             }
         }
 
+        # Fetch IAM policies related to EBS
+        if ($Verbose) { Write-Host "Fetching IAM policies for EBS access..." -ForegroundColor Yellow }
+        $iamPolicies = aws iam list-policies --profile $selectedProfile --query "Policies[*].PolicyName" --output json | ConvertFrom-Json
+        $ebsPolicies = $iamPolicies | Where-Object { $_ -match "EBS" -or $_ -match "Snapshot" }
+
         # Display results
         Write-Host "`nUnencrypted EBS Volumes:" -ForegroundColor Red
-        $unencryptedVolumes | Format-Table -Property VolumeId, InstanceId, Encrypted
+        if ($unencryptedVolumes.Count -gt 0) {
+            $unencryptedVolumes | Format-Table -AutoSize
+        } else {
+            Write-Host "All volumes are encrypted!" -ForegroundColor Green
+        }
+
+        Write-Host "`nUnencrypted Snapshots:" -ForegroundColor Red
+        if ($unencryptedSnapshots.Count -gt 0) {
+            $unencryptedSnapshots | Format-Table -AutoSize
+        } else {
+            Write-Host "All snapshots are encrypted!" -ForegroundColor Green
+        }
+
+        Write-Host "`nIAM Policies with EBS Access:" -ForegroundColor Cyan
+        if ($ebsPolicies.Count -gt 0) {
+            $ebsPolicies | Format-Table -AutoSize
+        } else {
+            Write-Host "No IAM policies with explicit EBS access found." -ForegroundColor Green
+        }
 
         Write-Host "`nSummary:" -ForegroundColor Cyan
         Write-Host "Total Unencrypted EBS Volumes: $($unencryptedVolumes.Count)" -ForegroundColor Red
+        Write-Host "Total Unencrypted Snapshots: $($unencryptedSnapshots.Count)" -ForegroundColor Red
 
     } catch {
         Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
+
+# Ensure function is available in the current session
+Set-Alias -Name Check-UnencryptedEBSVolumes -Value Check-EBSConfiguration
 
 # Inspect API Gateway Configurations Function
 function Inspect-APIGatewayConfigurations {
@@ -1698,24 +1726,65 @@ function Check-AWSLoggingStatus {
         }
 
         # Check CloudTrail Logs
-        if ($Verbose) { Write-Host "Checking CloudTrail logs..." -ForegroundColor Yellow }
-        $cloudTrails = aws cloudtrail describe-trails --profile $selectedProfile --region $awsRegion --query "trailList" --output json | ConvertFrom-Json
+        Write-Host "`nChecking AWS Cloudtrail..." -ForegroundColor Yellow
+        $cloudTrails = aws cloudtrail describe-trails --profile $selectedProfile --region $awsRegion --query 'trailList[*].{Name:Name, HomeRegion:HomeRegion, IsMultiRegion: IsMultiRegionTrail}' --output json | ConvertFrom-Json
 
-        if (-not $cloudTrails) {
-            Write-Host "No CloudTrails found in the region. Logging is disabled." -ForegroundColor Red
+        if ($cloudTrails.Count -eq 0) {
+            Write-Host "No CloudTrail trails found in region $awsRegion. CloudTrail is not enabled!" -ForegroundColor Red
         } else {
             foreach ($trail in $cloudTrails) {
-                $isLogging = aws cloudtrail get-trail-status --profile $selectedProfile --region $awsRegion --name $trail.Name --query "IsLogging" --output text
-                if ($isLogging -eq "true") {
-                    Write-Host "CloudTrail logging is enabled for trail: $($trail.Name)" -ForegroundColor Green
+                Write-Host "`nTrail Name: $($trail.Name)" -ForegroundColor Green
+                Write-Host "Home Region: $($trail.HomeRegion)"
+                Write-Host "Multi-Region Enabled: $($trail.IsMultiRegion)"
+
+                # Check if logging is enabled for each trail
+                $status = aws cloudtrail get-trail-status --profile $selectedProfile --region $awsRegion --name $trail.Name --query 'IsLogging' --output json | ConvertFrom-Json
+                if ($status -eq $true) {
+                    Write-Host "Logging Status: Enabled" -ForegroundColor Green
                 } else {
-                    Write-Host "CloudTrail logging is disabled for trail: $($trail.Name)" -ForegroundColor Red
+                    Write-Host "Logging Status: Disabled" -ForegroundColor Red
+                }
+
+                # Check if log file integrity validation is enabled
+                $logValidation = aws cloudtrail describe-trails --profile $selectedProfile --region $awsRegion --query "trailList[?Name=='$($trail.Name)'].LogFileValidationEnabled" --output json | ConvertFrom-Json
+                if ($logValidation -eq $true) {
+                    Write-Host "Log File Validation: Enabled (Tamper-proof logs)" -ForegroundColor Green
+                } else {
+                    Write-Host "Log File Validation: Disabled (Logs may be altered)" -ForegroundColor Yellow
+                }
+            }
+        }
+        
+        # Check if CloudWatch Alarms exist for security monitoring
+        Write-Host "`nChecking CloudWatch Alarms for Security Events..." -ForegroundColor Cyan
+        $cloudWatchAlarms = aws cloudwatch describe-alarms --profile $selectedProfile --region $awsRegion --query "MetricAlarms[*].AlarmName" --output json | ConvertFrom-Json
+
+        if ($cloudWatchAlarms.Count -eq 0) {
+            Write-Host "No CloudWatch alarms found for security monitoring in region $awsRegion!" -ForegroundColor Red
+        } else {
+            Write-Host "Existing CloudWatch Alarms for monitoring:" -ForegroundColor Green
+            $cloudWatchAlarms | ForEach-Object { Write-Host "- $_" }
+        }
+
+        # Check CloudTrail Log Retention Policy
+        Write-Host "`nVerifying CloudTrail Log Retention Policy..." -ForegroundColor Cyan
+        $logGroups = aws logs describe-log-groups --profile $selectedProfile --region $awsRegion --query 'logGroups[*].{Name:logGroupName, Retention:retentionInDays}' --output json | ConvertFrom-Json
+
+        if ($logGroups.Count -eq 0) {
+            Write-Host "No log groups found for CloudTrail logs!" -ForegroundColor Red
+        } else {
+            foreach ($group in $logGroups) {
+                Write-Host "Log Group: $($group.Name)"
+                if ($group.Retention) {
+                    Write-Host "Retention Period: $($group.Retention) days" -ForegroundColor Green
+                } else {
+                    Write-Host "Retention Period: Not set (logs may be lost over time)" -ForegroundColor Yellow
                 }
             }
         }
 
         # Check DNS Resolver Query Logs
-        if ($Verbose) { Write-Host "Checking DNS Resolver Query Logs..." -ForegroundColor Yellow }
+        if ($Verbose) { Write-Host "`nChecking DNS Resolver Query Logs..." -ForegroundColor Yellow }
         $queryLogConfigs = aws route53resolver list-resolver-query-log-configs --profile $selectedProfile --region $awsRegion --query "ResolverQueryLogConfigs" --output json | ConvertFrom-Json
 
         if ($queryLogConfigs.Count -eq 0) {
@@ -1727,7 +1796,7 @@ function Check-AWSLoggingStatus {
         }
 
         # Check WAF Logs
-        if ($Verbose) { Write-Host "Checking WAF logs..." -ForegroundColor Yellow }
+        if ($Verbose) { Write-Host "`nChecking WAF logs..." -ForegroundColor Yellow }
         $wafWebACLs = aws wafv2 list-web-acls --profile $selectedProfile --region $awsRegion --scope REGIONAL --query "WebACLs" --output json | ConvertFrom-Json
 
         if (-not $wafWebACLs) {
@@ -1744,7 +1813,7 @@ function Check-AWSLoggingStatus {
         }
 
         # Check GuardDuty
-        if ($Verbose) { Write-Host "Checking GuardDuty..." -ForegroundColor Yellow }
+        if ($Verbose) { Write-Host "`nChecking GuardDuty..." -ForegroundColor Yellow }
         $detectors = aws guardduty list-detectors --profile $selectedProfile --region $awsRegion --query "DetectorIds" --output json | ConvertFrom-Json
 
         if ($detectors.Count -eq 0) {
@@ -1753,7 +1822,7 @@ function Check-AWSLoggingStatus {
             Write-Host "GuardDuty is enabled." -ForegroundColor Green
         }
 
-        Write-Host "Logging status checks completed." -ForegroundColor Green
+        Write-Host "`nAWS Logging Status Check Completed!" -ForegroundColor Cyan
 
     } catch {
         Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
