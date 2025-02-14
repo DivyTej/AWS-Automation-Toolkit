@@ -108,19 +108,22 @@ function Check-IAMUsers {
 function Check-LambdaSecurity {
     param (
         [string]$LambdaFunctionName,
-        [string]$selectedProfile
+        [string]$selectedProfile,
+        [string]$awsRegion
     )
 
-    # Fetch Lambda function details
     Write-Host "Fetching Lambda functions..." -ForegroundColor Cyan
-    try {
-        $lambdaFunctions = if ($LambdaFunctionName -eq "*") {
-            $functions = aws lambda list-functions --query "Functions[*].FunctionName" --output json --profile $selectedProfile
-        } else {
-            $functions = @($LambdaFunctionName)
-        }
 
-        $lambdaFunctions = $functions | ConvertFrom-Json
+    try {
+        # Fetch Lambda functions
+        if ($LambdaFunctionName -eq "*") {
+            # Get all Lambda functions
+            $lambdaFunctions = aws lambda list-functions --profile $selectedProfile --region $awsRegion --query "Functions[*].FunctionName" --output json
+            $lambdaFunctions = $lambdaFunctions | ConvertFrom-Json
+        } else {
+            # Use the specified Lambda function name
+            $lambdaFunctions = @($LambdaFunctionName)
+        }
 
         if ($lambdaFunctions.Count -eq 0) {
             Write-Host "No Lambda functions found in your AWS account." -ForegroundColor Yellow
@@ -132,24 +135,46 @@ function Check-LambdaSecurity {
             Write-Host "`nChecking security for Lambda function: $lambdaFunction..." -ForegroundColor Cyan
 
             # Fetch function details
-            $functionDetails = aws lambda get-function --function-name $lambdaFunction --query "Configuration" --output json --profile $selectedProfile
+            $functionDetails = aws lambda get-function --function-name $lambdaFunction --profile $selectedProfile --region $awsRegion --query "Configuration" --output json
             $functionDetails = $functionDetails | ConvertFrom-Json
+
+            if (-not $functionDetails) {
+                Write-Host " - Failed to retrieve details for Lambda function: $lambdaFunction" -ForegroundColor Red
+                continue
+            }
 
             # 1. Check IAM Role Permissions
             $iamRole = $functionDetails.Role
             Write-Host " - IAM Role: $iamRole"
 
-            $iamRoleDetails = aws iam get-role --role-name (Split-Path -Leaf $iamRole) --query "Role.Policies" --output json --profile $selectedProfile
-            $iamRoleDetails = $iamRoleDetails | ConvertFrom-Json
-            if ($iamRoleDetails -eq $null) {
-                Write-Host "   - IAM role has no policies attached, potentially dangerous." -ForegroundColor Yellow
+            if ($iamRole) {
+                $roleName = ($iamRole -split '/')[-1]  # Extract role name from ARN
+                $iamRoleDetails = aws iam list-role-policies --role-name $roleName --profile $selectedProfile --region $awsRegion --output json
+                $iamRoleDetails = $iamRoleDetails | ConvertFrom-Json
+
+                if ($iamRoleDetails.PolicyNames.Count -eq 0) {
+                    Write-Host "   - IAM role has no inline policies attached, potentially dangerous." -ForegroundColor Yellow
+                } else {
+                    Write-Host "   - IAM role has inline policies attached." -ForegroundColor Green
+                }
+
+                # Check managed policies
+                $managedPolicies = aws iam list-attached-role-policies --role-name $roleName --profile $selectedProfile --region $awsRegion --output json
+                $managedPolicies = $managedPolicies | ConvertFrom-Json
+
+                if ($managedPolicies.AttachedPolicies.Count -eq 0) {
+                    Write-Host "   - IAM role has no managed policies attached, potentially dangerous." -ForegroundColor Yellow
+                } else {
+                    Write-Host "   - IAM role has managed policies attached." -ForegroundColor Green
+                }
             } else {
-                Write-Host "   - IAM role has policies attached." -ForegroundColor Green
+                Write-Host "   - No IAM role attached to the Lambda function." -ForegroundColor Red
             }
 
             # 2. Check if the Lambda has public triggers (e.g., API Gateway, SNS)
-            $triggers = aws lambda list-event-source-mappings --function-name $lambdaFunction --query "EventSourceMappings[*].EventSourceArn" --output json --profile $selectedProfile
+            $triggers = aws lambda list-event-source-mappings --function-name $lambdaFunction --profile $selectedProfile --region $awsRegion --query "EventSourceMappings[*].EventSourceArn" --output json
             $triggers = $triggers | ConvertFrom-Json
+
             if ($triggers.Count -gt 0) {
                 Write-Host "   - Lambda function has triggers: $($triggers -join ', ')" -ForegroundColor Green
             } else {
@@ -192,8 +217,9 @@ function Check-LambdaSecurity {
 
             # 6. Check CloudWatch Logs for Logging Configuration
             $logGroupName = "/aws/lambda/$lambdaFunction"
-            $logs = aws logs describe-log-groups --log-group-name-prefix $logGroupName --query "logGroups[*].logGroupName" --output json --profile $selectedProfile
+            $logs = aws logs describe-log-groups --log-group-name-prefix $logGroupName --profile $selectedProfile --region $awsRegion --query "logGroups[*].logGroupName" --output json
             $logs = $logs | ConvertFrom-Json
+
             if ($logs) {
                 Write-Host "   - CloudWatch Logs are configured." -ForegroundColor Green
             } else {
@@ -201,7 +227,7 @@ function Check-LambdaSecurity {
             }
         }
     } catch {
-        Write-Host "An error occurred while fetching Lambda functions or details. Please check your AWS CLI configuration." -ForegroundColor Red
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
@@ -1346,50 +1372,114 @@ function Check-SensitivePorts {
 function Check-EC2OutdatedAMIs {
     param (
         [string]$selectedProfile,
-        [string]$awsRegion
+        [string]$awsRegion,
+        [int]$thresholdDays = 180  # Default threshold for outdated AMIs (6 months)
     )
 
-    Write-Host "Checking outdated AMIs in region ${awsRegion} using profile ${selectedProfile}..." -ForegroundColor Cyan
+    Write-Host "Checking EC2 instances and their AMIs in region $awsRegion using profile $selectedProfile..." -ForegroundColor Cyan
 
     try {
-        # Get the list of AMIs in the region
-        $amis = Get-EC2Image -Region $awsRegion -ProfileName $selectedProfile -Filter @{ Name = 'state'; Values = 'available' }
-        $outdatedAMIs = @()
+        # Get all EC2 instances
+        $instances = aws ec2 describe-instances --profile $selectedProfile --region $awsRegion `
+            --query "Reservations[*].Instances[*].[InstanceId, ImageId, State.Name]" --output json | ConvertFrom-Json
+        
+        if (-not $instances -or $instances.Count -eq 0) {
+            Write-Host "No EC2 instances found in region $awsRegion." -ForegroundColor Yellow
+            return
+        }
 
-        # Check if each AMI is older than a certain threshold (e.g., 6 months)
-        foreach ($ami in $amis) {
-            $amiCreationDate = [DateTime]::Parse($ami.CreationDate)
-            $dateDifference = (Get-Date) - $amiCreationDate
+        # Flatten the nested list of instances
+        $flattenedInstances = $instances | ForEach-Object { $_ }
 
-            # Set the threshold to 6 months (180 days)
-            if ($dateDifference.Days -gt 180) {
-                $outdatedAMIs += $ami
+        # Get self-owned AMIs
+        $ownedAmis = aws ec2 describe-images --owners self --profile $selectedProfile --region $awsRegion `
+            --query "Images[*].{ImageId:ImageId, CreationDate:CreationDate}" --output json | ConvertFrom-Json
+
+        # Create a hashtable for quick lookup of self-owned AMI creation dates
+        $amiMap = @{}
+        foreach ($ami in $ownedAmis) {
+            if ($ami.ImageId) { 
+                $amiMap[$ami.ImageId] = [DateTime]::Parse($ami.CreationDate) 
             }
         }
 
-        if ($outdatedAMIs.Count -gt 0) {
-            Write-Host "`nOutdated AMIs found in region ${awsRegion}:" -ForegroundColor Green
-            $outdatedAMIs | ForEach-Object {
-                Write-Host "AMI ID: $($_.ImageId), Name: $($_.Name), Creation Date: $($_.CreationDate)" -ForegroundColor Yellow
-            }
+        $selfOwnedTable = @()
+        $publicTable = @()
+        $currentDate = Get-Date
 
-            # Ask the user for further action
-            $actionChoice = Read-Host "Do you want to delete these outdated AMIs? (Y/N)"
-            if ($actionChoice -eq 'Y') {
-                $outdatedAMIs | ForEach-Object {
-                    Write-Host "Deleting AMI ID: $($_.ImageId), Name: $($_.Name)" -ForegroundColor Red
-                    # Uncomment below line to actually delete the AMI
-                    # Remove-EC2Image -Region $awsRegion -ImageId $_.ImageId -ProfileName $selectedProfile
+        foreach ($instance in $flattenedInstances) {
+            $instanceId = $instance[0]
+            $amiId = $instance[1]
+            $instanceState = $instance[2]
+
+            if (-not $amiId) {
+                $publicTable += [PSCustomObject]@{
+                    InstanceId = $instanceId; State = $instanceState; AMI = 'MISSING'; Status = 'UNKNOWN'
                 }
-                Write-Host "Outdated AMIs have been deleted." -ForegroundColor Green
-            } else {
-                Write-Host "No AMIs were deleted." -ForegroundColor Yellow
+                continue
             }
-        } else {
-            Write-Host "`nNo outdated AMIs found in region ${awsRegion}." -ForegroundColor Green
+
+            if ($amiMap.ContainsKey($amiId)) {
+                # Self-owned AMI
+                $amiCreationDate = $amiMap[$amiId]
+                $daysOld = ($currentDate - $amiCreationDate).Days
+                $status = if ($daysOld -gt $thresholdDays) { "OUTDATED" } else { "UP-TO-DATE" }
+
+                $selfOwnedTable += [PSCustomObject]@{
+                    InstanceId = $instanceId; State = $instanceState; AMI = $amiId;
+                    Created = $amiCreationDate; Age = "$daysOld days"; Status = $status
+                }
+            } else {
+                # Public/shared AMI
+                $amiDetails = aws ec2 describe-images --image-ids $amiId --profile $selectedProfile --region $awsRegion `
+                    --query "Images[*].{CreationDate:CreationDate, OwnerId:OwnerId}" --output json | ConvertFrom-Json
+
+                if ($amiDetails -and $amiDetails[0]) {
+                    $amiCreationDate = [DateTime]::Parse($amiDetails[0].CreationDate)
+                    $ownerId = $amiDetails[0].OwnerId
+                    $daysOld = ($currentDate - $amiCreationDate).Days
+                    $status = "Public/Shared AMI"
+
+                    # Check for a newer version
+                    $latestAmis = aws ec2 describe-images --owners $ownerId --profile $selectedProfile --region $awsRegion `
+                        --query "Images[?starts_with(Name, '$amiId')].[ImageId, CreationDate]" --output json | ConvertFrom-Json
+                    
+                    if ($latestAmis) {
+                        $latestAmis = $latestAmis | Sort-Object { [DateTime]::Parse($_[1]) } -Descending
+                        $latestAmi = $latestAmis[0]
+                        $latestAmiId = $latestAmi[0]
+                        $latestAmiDate = [DateTime]::Parse($latestAmi[1])
+                        if ($latestAmiDate -gt $amiCreationDate) {
+                            $status = "OUTDATED - Newer AMI Available: $latestAmiId ($latestAmiDate)"
+                        }
+                    }
+                } else {
+                    $amiCreationDate = "Unknown"
+                    $daysOld = "Unknown"
+                    $status = "AMI NOT FOUND"
+                }
+
+                $publicTable += [PSCustomObject]@{
+                    InstanceId = $instanceId; State = $instanceState; AMI = $amiId;
+                    Created = $amiCreationDate; Age = "$daysOld days"; Status = $status
+                }
+            }
         }
-    } catch {
-        Write-Host "An error occurred while checking for outdated AMIs: $_" -ForegroundColor Red
+
+        # Display results
+        Write-Host "`nSelf-Owned AMIs:" -ForegroundColor Green
+        $selfOwnedTable | Format-Table -AutoSize
+
+        Write-Host "`nPublic/Shared AMIs:" -ForegroundColor Yellow
+        $publicTable | Format-Table -AutoSize
+
+        Write-Host "`nSummary:" -ForegroundColor Cyan
+        Write-Host "Total EC2 Instances Checked: $($flattenedInstances.Count)" -ForegroundColor Green
+        Write-Host "Total Outdated Self-Owned AMIs: $($selfOwnedTable | Where-Object { $_.Status -eq 'OUTDATED' } | Measure-Object | Select-Object -ExpandProperty Count)" -ForegroundColor Red
+        Write-Host "Total Public/Shared AMIs With Updates: $($publicTable | Where-Object { $_.Status -match 'OUTDATED' } | Measure-Object | Select-Object -ExpandProperty Count)" -ForegroundColor Red
+    }
+    catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
@@ -1979,3 +2069,186 @@ function Get-SQSConfiguration {
     }
 }
 
+# funtion for checking Secret Manager misconfigurations
+function Check-SecretsManagerSecurity {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion
+    )
+
+    Write-Host "Checking AWS Secrets Manager security in region $awsRegion using profile $selectedProfile..." -ForegroundColor Cyan
+
+    try {
+        # Get all secrets in the region
+        $secrets = aws secretsmanager list-secrets --profile $selectedProfile --region $awsRegion --query "SecretList[*].[Name, ARN, KmsKeyId, RotationEnabled, LastRotatedDate]" --output json | ConvertFrom-Json
+        if (-not $secrets -or $secrets.Count -eq 0) {
+            Write-Host "No secrets found in AWS Secrets Manager for region $awsRegion." -ForegroundColor Yellow
+            return
+        }
+
+        $encryptionTable = @()
+        $rotationAccessTable = @()
+
+        foreach ($secret in $secrets) {
+            $secretName = $secret[0]
+            $secretArn = $secret[1]
+            $kmsKeyId = $secret[2]
+            $rotationEnabled = $secret[3]
+            $lastRotatedDate = $secret[4]
+
+            # Check encryption (ensure it's using a customer-managed KMS key)
+            $formattedKmsKey = if ($kmsKeyId) { ($kmsKeyId -split "(.{30})" -ne '').Trim() -join "`n" } else { "Default Encryption" }
+            $encryptionStatus = if ($kmsKeyId) { "CMK Used:`n$formattedKmsKey" } else { "Default Encryption" }
+
+            # Check rotation status
+            $rotationStatus = "Disabled"
+            if ($rotationEnabled -eq $true) {
+                $rotationStatus = "Enabled"
+                $daysSinceRotation = if ($lastRotatedDate) { (New-TimeSpan -Start ([DateTime]::Parse($lastRotatedDate)) -End (Get-Date)).Days } else { "Unknown" }
+                if ($daysSinceRotation -is [int] -and $daysSinceRotation -gt 90) {
+                    $rotationStatus = "Rotation Overdue ($daysSinceRotation days)"
+                }
+            }
+
+            # Get secret policies to check access control
+            $policyJson = aws secretsmanager get-resource-policy --secret-id $secretArn --profile $selectedProfile --region $awsRegion --output json 2>$null
+            $accessControlStatus = if ($policyJson) { "Policy Exists" } else { "No Policy Found" }
+
+            # Populate Encryption Table
+            $encryptionTable += [PSCustomObject]@{
+                SecretName = $secretName
+                Encryption = $encryptionStatus
+            }
+
+            # Populate Rotation & Access Control Table
+            $rotationAccessTable += [PSCustomObject]@{
+                SecretName    = $secretName
+                Rotation      = $rotationStatus
+                AccessControl = $accessControlStatus
+            }
+        }
+
+        # Display Encryption Table
+        Write-Host "`nEncryption Audit:" -ForegroundColor Green
+        $encryptionTable | Format-Table -Wrap -AutoSize
+
+        # Display Rotation & Access Control Table
+        Write-Host "`nRotation & Access Control Audit:" -ForegroundColor Green
+        $rotationAccessTable | Format-Table -Wrap -AutoSize
+
+        # Calculate summary counts
+        $secretsWithoutAccessPolicy = ($rotationAccessTable | Where-Object { $_.AccessControl -eq 'No Policy Found' }).Count
+        $secretsWithoutRotationOrOverdue = ($rotationAccessTable | Where-Object { $_.Rotation -match 'Disabled|Overdue' }).Count
+
+        # Summary
+        Write-Host "`nSummary:" -ForegroundColor Cyan
+        Write-Host "Total Secrets Checked: $($secrets.Count)" -ForegroundColor Green
+        
+        # Access Control Policy Check
+        $accessControlColor = if ($secretsWithoutAccessPolicy -gt 0) { "Red" } else { "Green" }
+        Write-Host "Secrets Without Access Control Policy: $secretsWithoutAccessPolicy" -ForegroundColor $accessControlColor
+
+        # Rotation Check
+        $rotationColor = if ($secretsWithoutRotationOrOverdue -gt 0) { "Red" } else { "Green" }
+        Write-Host "Secrets Without Rotation or Overdue: $secretsWithoutRotationOrOverdue" -ForegroundColor $rotationColor
+    }
+    catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# funtion for checking ec2 misconfiguration
+function Check-EC2Configuration {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion
+    )
+
+    Write-Host "Checking EC2 configurations in region $awsRegion using profile $selectedProfile..." -ForegroundColor Cyan
+
+    try {
+        # Get all EC2 instances in the region
+        $instances = aws ec2 describe-instances --profile $selectedProfile --region $awsRegion --query "Reservations[*].Instances[*]" --output json | ConvertFrom-Json
+        if (-not $instances -or $instances.Count -eq 0) {
+            Write-Host "No EC2 instances found in region $awsRegion." -ForegroundColor Yellow
+            return
+        }
+
+        $ec2ConfigTable = @()
+
+        foreach ($instance in $instances) {
+            $instanceId = $instance.InstanceId
+            $instanceState = $instance.State.Name
+            $subnetId = $instance.SubnetId
+            $keyName = $instance.KeyName
+            $iamInstanceProfile = $instance.IamInstanceProfile
+            $securityGroups = $instance.SecurityGroups
+
+            # Check if the instance is in a private subnet
+            $subnetInfo = aws ec2 describe-subnets --subnet-ids $subnetId --profile $selectedProfile --region $awsRegion --query "Subnets[*].[MapPublicIpOnLaunch]" --output json | ConvertFrom-Json
+            $isPrivateSubnet = if ($subnetInfo[0] -eq $false) { "Yes" } else { "No" }
+
+            # Check if the instance uses a key pair
+            $keyPairStatus = if ($keyName) { "$keyName" } else { "No Key Pair" }
+
+            # Check IAM role assignment
+            $iamRoleStatus = "No IAM Role"
+            if ($iamInstanceProfile -and $iamInstanceProfile.Arn) {
+                $iamRoleArn = $iamInstanceProfile.Arn
+                $iamRoleName = ($iamRoleArn -split '/')[-1]  # Extract the role name from the ARN
+                $iamRoleStatus = "$iamRoleName"
+            }
+
+            # Check security groups
+            $securityGroupNames = ($securityGroups | ForEach-Object { $_.GroupName }) -join ", "
+            $securityGroupStatus = if ($securityGroupNames) { "$securityGroupNames" } else { "No Security Groups" }
+
+            # Populate EC2 Configuration Table
+            $ec2ConfigTable += [PSCustomObject]@{
+                InstanceId       = $instanceId
+                State           = $instanceState
+                PrivateSubnet    = $isPrivateSubnet
+                KeyPair         = $keyPairStatus
+                IAMRole         = $iamRoleStatus
+                SecurityGroups   = $securityGroupStatus
+            }
+        }
+
+        # Display EC2 Configuration Table
+        Write-Host "`nEC2 Configuration Audit:" -ForegroundColor Green
+        $ec2ConfigTable | Format-Table -Wrap -AutoSize
+
+        # Calculate summary counts
+        $instancesInPublicSubnets = ($ec2ConfigTable | Where-Object { $_.PrivateSubnet -eq 'No' }).Count
+        $instancesWithoutIAMRoles = ($ec2ConfigTable | Where-Object { $_.IAMRole -eq 'No IAM Role' }).Count
+        $instancesWithKeyPairs = ($ec2ConfigTable | Where-Object { $_.KeyPair -match 'Key Pair Used' }).Count
+
+        # Summary
+        Write-Host "`nSummary:" -ForegroundColor Cyan
+        Write-Host "Total EC2 Instances Checked: $($instances.Count)" -ForegroundColor Green
+
+        # Public Subnet Check
+        $subnetColor = if ($instancesInPublicSubnets -gt 0) { "Red" } else { "Green" }
+        Write-Host "Instances in Public Subnets: $instancesInPublicSubnets" -ForegroundColor $subnetColor
+
+        # IAM Role Check
+        $iamRoleColor = if ($instancesWithoutIAMRoles -gt 0) { "Red" } else { "Green" }
+        Write-Host "Instances Without IAM Roles: $instancesWithoutIAMRoles" -ForegroundColor $iamRoleColor
+
+        # Key Pair Check
+        $keyPairColor = if ($instancesWithKeyPairs -gt 0) { "Yellow" } else { "Green" }
+        Write-Host "Instances Using Key Pairs: $instancesWithKeyPairs" -ForegroundColor $keyPairColor
+        if ($instancesWithKeyPairs -gt 0) {
+            Write-Host "Recommendation: Rotate SSH key pairs regularly and ensure they are stored securely." -ForegroundColor Yellow
+        }
+
+        # Additional Recommendations
+        Write-Host "`nAdditional Recommendations:" -ForegroundColor Cyan
+        Write-Host "1. Enable automatic patching for EC2 instances using AWS Systems Manager Patch Manager." -ForegroundColor Yellow
+        Write-Host "2. Enable CloudWatch for detailed metrics and CloudTrail for auditing EC2 activity." -ForegroundColor Yellow
+        Write-Host "3. Assign IAM roles with the Principle of Least Privilege to EC2 instances." -ForegroundColor Yellow
+    }
+    catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
