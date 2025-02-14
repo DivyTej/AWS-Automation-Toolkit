@@ -65,7 +65,9 @@ function Show-MainMenu {
         "21. List AWS Logging",
         "22. List all RDS instances with details",
         "23. Check SQS Misconfiguration",
-        "24. Exit"
+        "24. Check Secret Manager Misconfiguration",
+        "25. Check EC2 Misconfiguration",
+        "26. Exit"
     )
     Write-Host "`nMain Dashboard - Select an Option:" -ForegroundColor Cyan
     $menuOptions | ForEach-Object { Write-Host $_ }
@@ -118,7 +120,7 @@ do {
     switch ($functionChoice) {
         "1" { Check-Identity }
         "2" { Check-IAMUsers }
-        "3" { Check-LambdaSecurity }
+        "3" { Check-LambdaSecurity -LambdaFunctionName "*" -SelectedProfile $selectedProfile -awsRegion $awsRegion  }
         "4" { Check-PublicS3Buckets }
         "5" {
             $EntityName = Read-Host "Enter IAM User or Role name for Managed Policies enumeration (Enter * for all)"
@@ -164,7 +166,9 @@ do {
             Get-RDSInstances -SelectedProfile $selectedProfile -awsRegion $awsRegion -Verbose
         }
         "23" { Get-SQSConfiguration -SelectedProfile $selectedProfile -awsRegion $awsRegion -Verbose }
-        "24" {
+        "24" { Check-SecretsManagerSecurity -SelectedProfile $selectedProfile -awsRegion $awsRegion }
+        "25" { Check-EC2Configuration -SelectedProfile $selectedProfile -awsRegion $awsRegion }
+        "26" {
             Write-Host "Exiting script..." -ForegroundColor Green
             return  # Exit the loop and script
         }
