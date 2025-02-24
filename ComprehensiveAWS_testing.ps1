@@ -67,7 +67,8 @@ function Show-MainMenu {
         "23. Check SQS Misconfiguration",
         "24. Check Secret Manager Misconfiguration",
         "25. Check EC2 Misconfiguration",
-        "26. Exit"
+        "26. Check KMS Misconfiguration",
+        "27. Exit"
     )
     Write-Host "`nMain Dashboard - Select an Option:" -ForegroundColor Cyan
     $menuOptions | ForEach-Object { Write-Host $_ }
@@ -168,7 +169,8 @@ do {
         "23" { Get-SQSConfiguration -SelectedProfile $selectedProfile -awsRegion $awsRegion -Verbose }
         "24" { Check-SecretsManagerSecurity -SelectedProfile $selectedProfile -awsRegion $awsRegion }
         "25" { Check-EC2Configuration -SelectedProfile $selectedProfile -awsRegion $awsRegion }
-        "26" {
+        "26" { Check-KMSConfiguration -SelectedProfile $selectedProfile -awsRegion $awsRegion }
+        "27" {
             Write-Host "Exiting script..." -ForegroundColor Green
             return  # Exit the loop and script
         }
