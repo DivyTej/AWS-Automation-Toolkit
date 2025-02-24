@@ -37,7 +37,8 @@ The **AWS Automation Toolkit** is a collection of PowerShell scripts designed to
 23. **AWS SQS Security Check**: Identify misconfigurations in AWS SQS queues.
 24. **AWS Secret Manager Configuration**: Identify misconfigurations related to AWS secret manager.
 25. **AWS EC2 Security Check**: Identify misconfigurations in AWS EC2.
-26. **Exit**: Exit the toolkit.
+26. **AWS KMS Security Check**: Identify misconfigurations in AWS KMS.
+27. **Exit**: Exit the toolkit.
 
 
 ---
