@@ -2252,3 +2252,103 @@ function Check-EC2Configuration {
         Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
+
+# funtion for checking kms misconfiguration
+function Check-KMSConfiguration {
+    param (
+        [string]$selectedProfile,
+        [string]$awsRegion
+    )
+
+    Write-Host "Checking KMS configurations in region $awsRegion using profile $selectedProfile..." -ForegroundColor Cyan
+
+    try {
+        # Get all KMS keys
+        $kmsKeys = aws kms list-keys --profile $selectedProfile --region $awsRegion --query "Keys[*].KeyId" --output json | ConvertFrom-Json
+
+        if (-not $kmsKeys -or $kmsKeys.Count -eq 0) {
+            Write-Host "No KMS keys found in region $awsRegion." -ForegroundColor Yellow
+            return
+        }
+
+        $kmsConfigTable = @()
+
+        foreach ($keyId in $kmsKeys) {
+            # Get key details
+            $keyDetails = aws kms describe-key --key-id $keyId --profile $selectedProfile --region $awsRegion --query "KeyMetadata" --output json | ConvertFrom-Json
+            
+            $keyState = $keyDetails.KeyState
+            $keyManager = $keyDetails.KeyManager
+            $isMultiRegion = $keyDetails.MultiRegion
+            $isEnabled = $keyDetails.Enabled
+            $deletionProtection = if ($keyDetails.DeletionDate) { "No" } else { "Yes" }
+
+$rotationEnabled = "Unknown"
+
+# Execute AWS CLI and capture error code
+$output = aws kms get-key-rotation-status --key-id $keyId --profile $selectedProfile --region $awsRegion --query "KeyRotationEnabled" --output json 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Access Denied for GetKeyRotationStatus on KeyId: $keyId" -ForegroundColor Red
+    $rotationEnabled = "Permission Denied"
+} else {
+    $rotationStatus = $output | ConvertFrom-Json
+    $rotationEnabled = if ($rotationStatus -eq $true) { "Enabled" } else { "Disabled" }
+}
+
+
+            # Check if CloudTrail logs KMS API calls
+            $cloudTrailEnabled = aws cloudtrail describe-trails --profile $selectedProfile --region $awsRegion --query "trailList[*].IncludeGlobalServiceEvents" --output json | ConvertFrom-Json
+            $kmsLogging = if ($cloudTrailEnabled -contains $true) { "Yes" } else { "No" }
+
+            # Get Key Policy and check for overly permissive access
+            $keyPolicy = aws kms get-key-policy --key-id $keyId --policy-name "default" --profile $selectedProfile --region $awsRegion --output json | ConvertFrom-Json
+            $isOverlyPermissive = if ($keyPolicy -match '"Effect": "Allow",\s*"Principal": "\*"') { "Yes" } else { "No" }
+
+            # Populate KMS Configuration Table
+            $kmsConfigTable += [PSCustomObject]@{
+                KeyId               = $keyId
+                State               = $keyState
+                MultiRegion         = $isMultiRegion
+                Enabled             = $isEnabled
+                Rotation            = $rotationEnabled
+                CloudTrailLogging   = $kmsLogging
+                OverlyPermissive    = $isOverlyPermissive
+                DeletionProtection  = $deletionProtection
+            }
+        }
+
+        # Display KMS Configuration Table
+        Write-Host "`nKMS Configuration Audit:" -ForegroundColor Green
+        $kmsConfigTable | Format-Table -Wrap -AutoSize
+
+        # Summary
+        Write-Host "`nSummary:" -ForegroundColor Cyan
+        Write-Host "Total KMS Keys Checked: $($kmsKeys.Count)" -ForegroundColor Green
+
+        # Key Rotation Check
+        $keysWithoutRotation = ($kmsConfigTable | Where-Object { $_.Rotation -eq 'Disabled' }).Count
+        $rotationColor = if ($keysWithoutRotation -gt 0) { "Red" } else { "Green" }
+        Write-Host "Keys Without Rotation: $keysWithoutRotation" -ForegroundColor $rotationColor
+
+        # Overly Permissive Policies
+        $overlyPermissiveKeys = ($kmsConfigTable | Where-Object { $_.OverlyPermissive -eq 'Yes' }).Count
+        $policyColor = if ($overlyPermissiveKeys -gt 0) { "Red" } else { "Green" }
+        Write-Host "Keys with Overly Permissive Policies: $overlyPermissiveKeys" -ForegroundColor $policyColor
+
+        # CloudTrail Logging Check
+        $keysWithoutLogging = ($kmsConfigTable | Where-Object { $_.CloudTrailLogging -eq 'No' }).Count
+        $loggingColor = if ($keysWithoutLogging -gt 0) { "Red" } else { "Green" }
+        Write-Host "Keys Without CloudTrail Logging: $keysWithoutLogging" -ForegroundColor $loggingColor
+
+        # Additional Recommendations
+        Write-Host "`nAdditional Recommendations:" -ForegroundColor Cyan
+        Write-Host "1. Enable automatic key rotation for all customer-managed KMS keys." -ForegroundColor Yellow
+        Write-Host "2. Ensure CloudTrail is logging KMS API calls for auditing." -ForegroundColor Yellow
+        Write-Host "3. Review key policies to avoid overly permissive access." -ForegroundColor Yellow
+        Write-Host "4. Enable deletion protection for critical keys to prevent accidental deletion." -ForegroundColor Yellow
+
+    }
+    catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
